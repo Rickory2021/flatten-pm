@@ -1,0 +1,100 @@
+# scripts/flatten-sync/modifiers.yaml
+#
+# Modifier library for the flatten export script.
+# Committed and shared. Plain .yaml, no personal variant needed.
+#
+# Modifiers are named patterns. They define WHAT to match, not what
+# to do with it. Profiles decide the direction (include or exclude).
+#
+# `silent: true` means exclude from _CONTEXT.yaml manifest when excluded.
+#                 Does not auto-activate, profiles control activation.
+
+modifiers:
+
+  # -- Silent (suppressed from manifest) --------------------------------
+
+  dev-env:
+    silent: true
+    files:
+      - uv.lock
+      - Cargo.lock
+      - package-lock.json
+    dirs:
+      - .git
+      - __pycache__
+      - .pytest_cache
+      - .mypy_cache
+      - .ruff_cache
+      - .venv
+      - venv
+      - .uv
+      - .idea
+      - .vscode
+      - .cache
+      - .tauri
+    note: "Development environment directories and lock files."
+
+  generated-files:
+    silent: true
+    files:
+      - .DS_Store
+      - Thumbs.db
+    patterns:
+      - '\.pyc$'
+      - '\.pyo$'
+      - '\.log$'
+      - '\.sw.$'
+    note: "OS, editor, and Python-generated files."
+
+  build-output:
+    silent: true
+    dirs:
+      - target
+      - node_modules
+      - dist
+      - project-export-files
+      - render-out
+      - gen
+    note: "Rust build, Node deps, Vite output, flatten export, Tauri codegen."
+
+  active-configs:
+    silent: true
+    patterns:
+      - '\.config\.yaml$'
+    note: "Personal config files (gitignored)."
+
+  secrets:
+    silent: true
+    patterns:
+      - '\.env$'
+      - '\.env\.local$'
+    note: "Environment files with credentials."
+
+  script-data:
+    silent: true
+    dirs:
+      - processed
+    note: "Watcher processed files directory."
+
+  binary-assets:
+    silent: false
+    dirs:
+      - icons
+    patterns:
+      - '\.ttf$'
+      - '\.otf$'
+      - '\.woff2?$'
+      - '\.png$'
+      - '\.ico$'
+      - '\.icns$'
+    note: "Binary font and icon files. AI platforms cannot process them; manifest tracks their paths for context."
+
+  # -- Toggleable (profiles decide direction) -------------------------
+
+  scripts:
+    dirs: [scripts]
+    note: "Flatten-sync tooling."
+
+  tauri-capabilities:
+    dirs: [capabilities]
+    note: "Tauri permission and capability JSON files."

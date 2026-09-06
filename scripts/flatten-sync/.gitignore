@@ -1,0 +1,8 @@
+# scripts/flatten-sync/.gitignore
+
+# Personal profile configs (contain local paths)
+profiles/*.flatten.config.yaml
+profiles/*.watch.config.yaml
+
+# Watcher processed files (moved from source after placement)
+processed/

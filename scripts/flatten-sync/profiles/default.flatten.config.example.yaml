@@ -1,0 +1,27 @@
+# scripts/flatten-sync/profiles/default.flatten.config.example.yaml
+#
+# Full repo export for Claude Project upload.
+# Copy to default.flatten.config.yaml and adjust as needed.
+#
+# Resolution: default.flatten.config.yaml (yours) > default.flatten.config.example.yaml
+root:
+  __path: .
+  __modifier:
+    exclude:
+      - [dev-env, generated-files, build-output, active-configs, secrets, script-data, binary-assets]
+  __note: "Repo root (README, PROJECT_INSTRUCTIONS, LICENSE, Makefile)"
+  src:
+    __path: src
+    __note: "React frontend (TypeScript, Vite)"
+  src-tauri:
+    __path: src-tauri
+    __modifier:
+      exclude:
+        - [tauri-capabilities]
+    __note: "Tauri app crate (Rust)"
+  crates:
+    __path: crates
+    __note: "Workspace crates (flatten-core, flatten-cli)"
+  scripts:
+    __path: scripts
+    __note: "Flatten-sync tooling"

@@ -1,0 +1,21 @@
+# scripts/flatten-sync/profiles/default.watch.config.example.yaml
+#
+# Watch profile for auto-placing downloaded project files into the repo.
+# Copy to default.watch.config.yaml and adjust for your environment.
+
+source:
+  windows_user: auto
+  # directory: /custom/path     # override to watch a non-Downloads folder
+
+target:
+  repo: ~/flatten-pm
+
+cleanup:
+  mode: move
+  move_to: processed
+
+polling:
+  interval: 1.5
+  stable_wait: 0.5
+  stable_retries: 6
+  repo_map_refresh: 30
