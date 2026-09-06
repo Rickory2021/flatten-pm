@@ -1,0 +1,57 @@
+# .gitignore
+# Rust / Cargo
+target/
+**/*.rs.bk
+*.pdb
+
+# Node / Vite
+node_modules/
+dist/
+dist-ssr
+*.local
+ 
+# Tauri
+src-tauri/gen/
+
+# Environment
+.env
+.env.*
+!.env.example
+ 
+# Flatten-sync (project export and watch tooling)
+project-export-files/
+scripts/flatten-sync/processed/
+scripts/flatten-sync/profiles/*.config.yaml
+!scripts/flatten-sync/profiles/*_example.yaml
+ 
+# Python (flatten-sync runtime)
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.uv/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

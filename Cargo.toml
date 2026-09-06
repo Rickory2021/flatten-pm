@@ -1,0 +1,8 @@
+# Cargo.toml
+[workspace]
+resolver = "2"
+members = [
+  "src-tauri",
+  "crates/flatten-core",
+  "crates/flatten-cli",
+]
