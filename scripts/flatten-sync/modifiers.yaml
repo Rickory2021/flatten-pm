@@ -87,7 +87,8 @@ modifiers:
       - '\.png$'
       - '\.ico$'
       - '\.icns$'
-    note: "Binary font and icon files. AI platforms cannot process them; manifest tracks their paths for context."
+      - '\.svg$'
+    note: "Font, icon, and image files. AI platforms cannot process them; manifest tracks their paths for context."
 
   # -- Toggleable (profiles decide direction) -------------------------
 
