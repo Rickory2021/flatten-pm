@@ -15,6 +15,8 @@ This is a deliberate choice. The developer is building coding fluency and needs 
 
 A Tauri 2.x desktop application that syncs codebases with AI project UIs (Claude Projects, ChatGPT, Gemini). Two pipelines: export (repo to flat files for upload) and watch (AI-generated files back into the repo). A visual profile manager replaces the per-repo script-and-YAML setup.
 
+Flatten PM is not a greenfield build. The `scripts/flatten-sync/` directory contains the working prototype: a Python-based export and watch tool used across 7+ production projects. The app productizes that proven workflow into a GUI with standardized configuration, easier migration between projects, and flexibility that previously required LLM assistance to set up per repo.
+
 The project is public and open source (MIT). No NDA constraints.
 
 For full product design, architecture, ADRs, and roadmap, see `DESIGN.md`. That file is the authoritative reference for settled decisions. Do not revisit ADRs without explicit instruction.
@@ -26,7 +28,7 @@ flatten-pm/
   src/                        # React frontend (TypeScript, Vite)
   src-tauri/                  # Tauri app crate
   crates/                     # Workspace crates (flatten-core lib, flatten-cli bin)
-  scripts/                    # Tooling (flatten-sync for project export/watch)
+  scripts/                    # Tooling; includes flatten-sync prototype (Python, battle-tested across 7+ projects)
 ```
 
 Root-level files: `README.md`, `LICENSE`, `PROJECT_INSTRUCTIONS.md`, `DESIGN.md`, `Makefile`, `Cargo.toml` (workspace root), and the standard Vite/TypeScript configs.
@@ -127,5 +129,3 @@ Commit by logical checkpoint, not by session or file count.
 **CLI work:** `crates/flatten-cli/src/main.rs`.
 
 **MCP backend (v2):** `DESIGN.md` MCP backend and forge daemon sections.
-
-
