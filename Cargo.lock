@@ -1008,13 +1008,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "flatten-cli"
-version = "0.1.0"
-dependencies = [
- "flatten-core",
-]
-
-[[package]]
 name = "flatten-core"
 version = "0.1.0"
 
@@ -1028,6 +1021,13 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+]
+
+[[package]]
+name = "flatten-pm-cli"
+version = "0.1.0"
+dependencies = [
+ "flatten-core",
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-// crates/flatten-cli/src/main.rs
+// crates/src-cli/src/main.rs
 fn main() {
     println!("Hello, world!");
 }

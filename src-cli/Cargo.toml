@@ -1,8 +1,8 @@
-# crates/flatten-cli/Cargo.toml
+# crates/src.cli/Cargo.toml
 [package]
 name = "flatten-cli"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-flatten-core = { path = "../flatten-core" }
+flatten-core = { path = "../crates/flatten-core" }

@@ -3,6 +3,6 @@
 resolver = "2"
 members = [
   "src-tauri",
+  "src-cli",
   "crates/flatten-core",
-  "crates/flatten-cli",
 ]
