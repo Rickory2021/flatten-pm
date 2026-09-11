@@ -118,7 +118,7 @@ stories:
         embedded runtime, so that builtins and custom transforms are the same
         kind of thing.
       stage: s1
-      status: backlog
+      status: done
       acceptance_criteria:
         - "rquickjs (with bindgen feature where prebuilt bindings are absent) builds in CI on Linux, macOS, and Windows"
         - "A throwaway binary demonstrates: interrupt-handler timeout, memory limit, and module evaluation from an in-memory string"
