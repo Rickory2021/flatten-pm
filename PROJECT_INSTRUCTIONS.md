@@ -19,7 +19,7 @@ Flatten PM is not a greenfield build. The `scripts/flatten-sync/` directory cont
 
 The project is public and open source (MIT). No NDA constraints.
 
-For full product design, architecture, ADRs, and roadmap, see `DESIGN.md`. That file is the authoritative reference for settled decisions. Do not revisit ADRs without explicit instruction.
+For full product design, architecture, ADRs, and roadmap, see `docs/design/` (seven numbered files, 0 through 6). That directory is the authoritative reference for settled decisions. ADRs are in `docs/ADR.md` (54 records). Do not revisit ADRs without explicit instruction. Each ADR records the alternatives it rejected; read the relevant ADR before proposing a change that touches the recipe model, export state, flags, or transforms. Terms are defined in `docs/VOCABULARY.md`. Stories and build order are in `docs/BACKLOG.yaml`.
 
 ## Repo structure
 
@@ -28,12 +28,17 @@ flatten-pm/
   src/                        # React frontend (TypeScript, Vite)
   src-tauri/                  # Tauri app crate
   crates/                     # Workspace crates (flatten-core lib, flatten-cli bin)
+  docs/                       # Design docs, ADRs, vocabulary, backlog
+    design/                   # Seven numbered files (0_SUMMARY through 6_VERSIONING)
+    ADR.md                    # Architecture decision records (54)
+    VOCABULARY.md             # Term list with contract pointers
+    BACKLOG.yaml              # Stories and build order
   scripts/                    # Tooling; includes flatten-sync prototype (Python, battle-tested across 7+ projects)
 ```
 
-Root-level files: `README.md`, `LICENSE`, `PROJECT_INSTRUCTIONS.md`, `DESIGN.md`, `Makefile`, `Cargo.toml` (workspace root), and the standard Vite/TypeScript configs.
+Root-level files: `README.md`, `LICENSE`, `PROJECT_INSTRUCTIONS.md`, `Makefile`, `Cargo.toml` (workspace root), and the standard Vite/TypeScript configs.
 
-For architecture details and the full tech stack, see `DESIGN.md`.
+For architecture details and the full tech stack, see `docs/design/0_SUMMARY.md`.
 
 ## Working mode
 
@@ -78,7 +83,7 @@ These reflect how the developer works. Follow them.
 - Explain Rust concepts (ownership, borrowing, lifetimes, traits, error handling, async) at the level the developer needs. Adapt to their current understanding.
 - Explain Tauri 2.x patterns (commands, state management, event system, IPC, capabilities, plugins).
 - Explain React patterns relevant to the frontend (hooks, state, component architecture).
-- Walk through approaches to implementing features described in `DESIGN.md`.
+- Walk through approaches to implementing features described in `docs/design/`.
 - Review code the developer wrote and give feedback (correctness, idiom, edge cases, performance).
 - Debug errors the developer encounters (compiler errors, runtime behavior, Tauri-specific issues).
 - Discuss architecture tradeoffs within the scope of settled ADRs.
@@ -87,7 +92,7 @@ These reflect how the developer works. Follow them.
 ## What the assistant does not do here
 
 - Produce full implementation files for the developer to paste.
-- Make architectural decisions that override `DESIGN.md` ADRs.
+- Make architectural decisions that override `docs/ADR.md` ADRs.
 - Auto-fix code the developer asks to review.
 - Expand scope beyond what was asked.
 
@@ -116,16 +121,20 @@ Commit by logical checkpoint, not by session or file count.
 
 ## Files to read based on task
 
-**Understanding the design:** `DESIGN.md` (architecture, ADRs, roadmap, tech stack). Read this before answering any design question.
+**Understanding the design:** `docs/design/0_SUMMARY.md` (architecture, stages, three stores, tech stack), then the relevant numbered file. `docs/ADR.md` for decision rationale. `docs/VOCABULARY.md` for terms.
 
-**Export pipeline work:** `DESIGN.md` export pipeline section, `crates/flatten-core/src/`.
+**Export pipeline work:** `docs/design/3_RECIPES.md` (recipe language, transforms, templates, enrichment), `docs/design/4_EXPORT.md` (export flow, export state, short-circuit), `crates/flatten-core/src/`.
 
-**Watch pipeline work:** `DESIGN.md` watch pipeline and placement rule sections, `crates/flatten-core/src/`.
+**Watch pipeline work:** `docs/design/5_WATCH.md` (detection, resolution, return step, flags, reconciliation), `crates/flatten-core/src/`. Watch resolves through the export state's recorded rules, never live recipes.
+
+**Ingest work:** `docs/design/2_INGEST.md` (repos, trie, ingest rules), `crates/flatten-core/src/`.
 
 **Frontend work:** `src/`, `src-tauri/tauri.conf.json` for capability permissions.
 
 **Tauri integration:** `src-tauri/src/lib.rs`, `src-tauri/Cargo.toml` for command registration.
 
-**CLI work:** `crates/flatten-cli/src/main.rs`.
+**CLI work:** `crates/flatten-cli/src/main.rs`, `docs/design/1_INFRASTRUCTURE.md` (CLI subcommand table). Every s1 story's `verification` block in `docs/BACKLOG.yaml` names the command that proves it.
 
-**MCP backend (v2):** `DESIGN.md` MCP backend and forge daemon sections.
+**Versioning and audit:** `docs/design/6_VERSIONING.md` (versioning model, shipped defaults, file history).
+
+**MCP backend (v2):** `docs/design/0_SUMMARY.md` s3 section.

@@ -1,0 +1,981 @@
+# docs/BACKLOG.yaml
+#
+# Flatten PM project backlog.
+# Epics derived from docs/design/. Decision history in docs/ADR.md.
+#
+# Status values: backlog | in-progress | done
+# Stage values: s1 (core engine + CLI) | s2 (desktop UI + product features) | s3 (v2+)
+#
+# Stories ordered by stage, then by build progression within each stage.
+# Top-to-bottom reading order is the roadmap: earlier stories provide the
+# foundation later stories build on. Story IDs are stable; stories may be
+# rewritten, IDs never change.
+#
+# Build order note: the rquickjs spike (EX-002) is the first s1 work item,
+# before DA-001, because its failure changes every transform.
+#
+# Every s1 story ends with a `verification` block: the flatten CLI command or
+# cargo test target that proves the acceptance criteria against a named fixture
+# under fixtures/. A story is done when its verification passes.
+
+# --- Epics -------------------------------------------------------------------------------
+
+epics:
+
+  data-and-auditability:
+    story: >
+      As a developer, pipeline data survives app restarts and every operation is
+      recorded with diffs, so that the app is stateful and auditable.
+    description: >
+      Persistent storage infrastructure and audit trail in flatten-core. SQLite
+      (rusqlite, bundled, WAL mode) behind a dedicated writer thread; three
+      pointer-versioned entities (build_recipes, transforms, templates) with
+      repo_versions as append-only; export_state one row per binding; watch_match_flags
+      and watch_match_candidates for detection state; change_counter for cross-process
+      coordination. file_history (s2) is the append-only audit trail.
+
+  ingest-pipeline:
+    story: >
+      As a developer, I can register a source directory and curate a file list from
+      my rules, so that only what I want reaches downstream stages.
+    description: >
+      Registers a source as a repos row, walks it under gitignore-style rules
+      via the ignore crate, and builds a trie with BLAKE3 hashes per leaf and
+      per directory (Merkle). The trie holds paths and hashes, nothing else.
+      Configuration follows a seed-then-own pattern: .gitignore is a one-time
+      import at registration, then the stored flat pattern list is the SSOT.
+
+  export-pipeline:
+    story: >
+      As a developer, I can compose ingested sources through a block-structured
+      recipe into an export folder, so that each AI platform gets the format it
+      needs and every export records how it was made.
+    description: >
+      A build recipe is block-structured text with five recipe-level instructions
+      (ARG, COPY_DEFAULT_WITH, SOURCE, RUN, INVOKE) plus a WATCH configuration
+      block. SOURCE blocks contain COPY blocks; COPY blocks contain EXCLUDE and
+      OVERRIDE_WITH. Each COPY block carries a stable key (AS), per-file transform
+      chains, and excludes. Export records each COPY block's resolution rules
+      (including derived reverse chains and override chains) in export_state. Watch
+      resolves against that record. Transforms are JavaScript in QuickJS-NG.
+
+  watch-pipeline:
+    story: >
+      As a developer, AI-generated content is detected, resolved through the
+      rules my exports recorded, and placed back into my repo, so that I review
+      changes instead of moving files.
+    description: >
+      One watch session per process serves every active binding. Detection
+      extracts enrichment via patterns derived from every template set version,
+      resolves per binding against recorded COPY block rules in export_state,
+      and either places (one claim) or flags (multiple or zero). The return
+      step reads override_chain or derived_reverse_chain from the export_state
+      record, never live recipes.
+
+  cli:
+    story: >
+      As a developer, I can drive every stage from a terminal against fixtures,
+      so that each story is verifiable without a window.
+    description: >
+      The flatten binary (src-cli/). Thin subcommand dispatch over flatten-core.
+      The s1 test harness: every s1 story's verification block is a flatten
+      command or a cargo test target.
+
+  desktop-app:
+    story: >
+      As a developer, I can manage ingest, export, and watch through a desktop GUI,
+      so that config, execution, and review happen in one place.
+    description: >
+      Tauri 2.x shell with a React frontend. The visual delivery surface for the
+      three stages. Every command is a thin wrapper over a flatten-core function
+      that the CLI also calls; no logic lives in the Tauri layer.
+
+  mcp-server:
+    story: >
+      As an AI agent, I can query project context from a running Flatten PM app over
+      MCP, so that I access pipelines and recipes without re-uploads.
+    description: >
+      An MCP server hosted inside the Tauri process via rmcp and axum, exposed as
+      Streamable HTTP on localhost. Targets the stateless spec.
+
+  forge-daemon:
+    story: >
+      As a developer, I access MCP tools from all forge projects through one persistent
+      endpoint, so that AI agents connect once instead of per-project.
+    description: >
+      A persistent FastMCP daemon that aggregates MCP tools from all forge projects
+      behind one Streamable HTTP endpoint with prefixed tool mounts.
+
+# --- s1 (core engine + CLI) ---------------------------------------------------------------
+
+stories:
+
+  data-and-auditability:
+
+    EX-002:
+      story: >
+        As a developer, I can run JavaScript transforms inside a sandboxed
+        embedded runtime, so that builtins and custom transforms are the same
+        kind of thing.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "rquickjs (with bindgen feature where prebuilt bindings are absent) builds in CI on Linux, macOS, and Windows"
+        - "A throwaway binary demonstrates: interrupt-handler timeout, memory limit, and module evaluation from an in-memory string"
+        - "If rquickjs fails the spike, the fallback is Lua via mlua on the same trait contract"
+      verification:
+        - "cargo test -p flatten-core runtime::spike demonstrates timeout, memory limit, and module eval on all three CI targets"
+      notes: >
+        This is the first s1 work item. Its failure changes every RUN and every
+        per-file transform chain. The full transform runtime (host API, ctx,
+        sandbox, file vs directory scope) is built in EX-002B after the
+        foundation stories.
+
+    DA-001:
+      story: >
+        As a developer, the app has a persistent database that survives restarts,
+        so that pipeline data is not lost between sessions.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Single SQLite DB file in app data directory; path overridable via --db for tests and --data-dir for the whole app data tree"
+        - "WAL mode enabled at connection time; busy_timeout configured (e.g. 5000ms)"
+        - "Writer: one dedicated thread owning the write Connection, fed by a channel whose unit of work is a transaction; no Connection is Sync-shared or held across an await"
+        - "Reader connections opened per caller, read-only"
+        - "WAL checkpoint: auto-checkpoint (SQLite default); no manual PRAGMA wal_checkpoint rule"
+        - "Schema versioning via PRAGMA user_version; forward migrations on startup"
+        - "Migrations run inside BEGIN IMMEDIATE; a second process re-reads user_version after acquiring the lock and skips applied steps"
+        - "Tables created (16): repos, repo_versions, build_recipes, build_recipe_versions, transforms, transform_versions, templates, template_versions, pipeline_bindings, export_state, watch_match_flags, watch_match_candidates, safety_findings (s2, schema only), file_history (s2, schema only), settings, change_counter"
+        - "Uniqueness: (name) on repos, build_recipes, transforms, templates; (build_recipe_id, version) on build_recipe_versions; (transform_id, version) on transform_versions; (template_id, version) on template_versions; (pipeline_binding_id) unique on export_state; (watch_match_flag_id, pipeline_binding_id, repo_id) on watch_match_candidates; (export_state_id, repo_id, file_path, rule_id) on safety_findings"
+        - "FK actions: build_recipe_versions deletion sets null on file_history.build_recipe_version_id and watch_match_candidates.build_recipe_version_id; pipeline_bindings deletion cascades export_state (which cascades safety_findings), sets null on watch_match_candidates.pipeline_binding_id; watch_match_flags deletion cascades watch_match_candidates"
+        - "Indexes: file_history (repo_id, file_path, created_at)"
+        - "Seed: builtin transforms (flatten, pack, enrichment-injection, enrichment-trim, context-manifest) with scope (file or directory), curation=builtin, and enrichment-trim.reverses=enrichment-injection; builtin templates (default with kind=enrichment, context-manifest with kind=file) with curation=builtin; seeding runs no JS"
+        - "Seed: shipped generic recipe (name shipped-default; see 3_RECIPES.md shipped recipe) as build_recipes with curation=builtin and version 1"
+        - "Upgrade rule: on startup, compare embedded shipped content against ALL existing version rows for each builtin entity (not just the current version); if no row matches, insert a new version; never move the pointer; user adopts via restore-from-shipped; CLI ls commands show '(update available)' next to entities with a newer unpointed shipped version"
+        - "Trigger or app rule prevents soft-delete and hard-delete of curation=builtin rows"
+        - "Active binding guard: soft-deleting a repo or recipe that has active bindings is a domain error naming the bindings"
+        - "Settings seeded with defaults per the Settings contract: watch_source_dir (unset), watch_poll_interval_ms (30000), watch_settle_ms (500), watch_debounce_ms (250), trie_refresh_interval_ms (30000), transform_timeout_ms (10000), transform_memory_mb (256), copy_size_limit_mb (64), binary_extensions (seeded list)"
+        - "change_counter table: single row (id=1), monotonic counter; bumped in the same transaction as every export success, binding activate/deactivate/delete, and entity pointer move"
+        - "No Tauri dependencies (callable from flatten-core)"
+      verification:
+        - "flatten db init --db /tmp/t.db creates the file; PRAGMA journal_mode returns wal; PRAGMA user_version equals the latest migration"
+        - "flatten db tables --db /tmp/t.db --json lists exactly the 16 tables"
+        - "flatten db query 'select name, scope, curation, reverses from transforms' --db /tmp/t.db shows the five builtins with enrichment-trim reversing enrichment-injection; 'select name, kind, curation from templates' shows default (enrichment, builtin) and context-manifest (file, builtin); 'select name from build_recipes' shows shipped-default"
+        - "Deleting a builtin row is rejected by the app rule (cargo test exercises this directly)"
+        - "Soft-deleting a repo with an active binding returns a domain error naming the binding (cargo test)"
+        - "Two flatten db init processes started concurrently both exit 0 and the schema is intact"
+        - "cargo test -p flatten-core db:: covers migration idempotency, the upgrade rule, and two transactions submitted concurrently to the writer channel committing without interleaving"
+      notes: >
+        F-04: WAL checkpoint uses auto-checkpoint (SQLite default); no manual
+        PRAGMA wal_checkpoint rule. F-13: safety_findings uniqueness includes
+        rule_id in the constraint.
+
+    CLI-001:
+      story: >
+        As a developer, I have a flatten binary with stable subcommands, exit
+        codes, and JSON output, so that every later story can be verified from
+        a shell.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Subcommand groups reserved: db, repo, recipe, transform, template, binding, export, watch, flag, history, settings"
+        - "--data-dir <path> overrides the app data directory for tries, export folders, database, PID file"
+        - "--db <path> overrides the database location; default is the app data directory (or --data-dir if set)"
+        - "--json switches output to machine-readable JSON on stdout; human output otherwise"
+        - "Exit codes: 0 success, 1 domain error (bad input, not found, IO, transform, database), 2 usage error"
+        - "Errors printed to stderr as one line; --json wraps them as {\"error\": ..., \"kind\": \"...\", ...} per the error model (domain, usage, io, transform, database)"
+        - "fixtures/ directory convention: fixtures/<name>/ for repos, fixtures/recipes/*.recipe, fixtures/transforms/*.js, fixtures/downloads/ for watch inputs"
+        - "db init, db tables, and db query <sql> (read-only, write statements rejected) implemented here"
+        - "settings get <key> and settings set <key> <value> implemented here; unknown keys exit 1; values validated per key"
+        - "Long-running subcommands (watch) stop cleanly on SIGINT/Ctrl+C: in-flight placement finishes, never half-written; exit 0"
+      verification:
+        - "flatten --help lists the eleven groups; flatten nope exits 2"
+        - "flatten db init --db /tmp/t.db --json prints {\"ok\": true, \"user_version\": N}"
+        - "flatten settings set watch_source_dir /nonexistent exits 1 with a path error"
+      notes: >
+        F-52: session restart (--since last) is a v2 concern. F-53: logging
+        contract (tracing, NDJSON event stream) to be settled during
+        implementation; the story establishes the CLI frame, not the logging
+        architecture.
+
+    DA-002:
+      story: >
+        As a developer, repo file tries survive app restarts, so that watch
+        detection works immediately without a full re-ingest.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Trie API: insert(path, hash), remove(path), get(path), has(path), list(prefix) sorted by path, leaf_hash(path), subtree_hash(dir), root_hash()"
+        - "Leaf: (path, content_hash, size, mtime); size and mtime are cache metadata for stat-based refresh, not hashed into the Merkle tree"
+        - "Leaf hash: BLAKE3 over raw bytes only; no line-ending normalization"
+        - "Directory nodes carry a Merkle hash over sorted (child_name, child_hash), recomputed on mutation"
+        - "Paths stored as String, case-sensitive; non-UTF-8 names converted lossily and logged"
+        - "Arena storage: Vec<Node> with index-based references behind Arc<Trie>"
+        - "Serialized to MessagePack via rmp-serde at tries/{repo_id}.trie"
+        - "Atomic writes via tempfile + rename in the same directory"
+        - "Persist is debounced (dirty flag; written after quiescence and on shutdown), not per mutation"
+        - "repos.trie_updated_at written on every persist"
+        - "Missing or corrupt file triggers full re-ingest and a warning; never a crash"
+        - "Refresh builds a new trie off-lock and swaps the Arc; readers never observe a partial trie; callers holding a clone of the old Arc keep it for their operation"
+        - "Refresh reports whether root_hash changed"
+        - "Full re-hash: stat + hash every file; runs at session start, on repo reingest --full, and when trie file is missing or corrupt"
+        - "Stat-based refresh: compare each file's current (size, mtime) against the leaf; re-hash only changed or new files; remove leaves for deleted files; recompute Merkle for affected subtrees; runs on the 30s timer"
+        - "Copy-on-write: watch placement uses Arc::make_mut, re-hashes the placed file, updates leaf and directory hashes, swaps the Arc"
+      verification:
+        - "cargo test -p flatten-core trie:: covers insert/remove, Merkle recompute, sorted list, lossy path conversion, case-sensitive keys, stat-based refresh (changed mtime triggers rehash, unchanged skips), copy-on-write update"
+        - "flatten repo add fixtures/repo-a --name repo-a then flatten repo ls --json shows trie_updated_at set and tries/<id>.trie present"
+        - "Truncate tries/<id>.trie, run flatten repo ls; log shows re-ingest, file regenerated, command exits 0"
+      notes: >
+        F-43: arena and snapshot cadence are suggested implementation details,
+        not hard contracts. The trie is an internal type; its in-memory shape
+        is a build-time decision.
+
+    IN-001:
+      story: >
+        As a developer, I can register a source and define gitignore-style
+        exclude patterns for it, so that I control exactly what gets ingested.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Register a source: insert repos row with path, name, ingest_patterns (gitignore-style list), line_ending_policy (default preserve); name is what SOURCE instructions reference"
+        - "Config ejection: at registration, optionally import from .gitignore files in the source (one-time read, not a live dependency); import compiles .gitignore patterns into a flat list and stores in ingest_patterns; without import, default is .git/ only"
+        - "Stored ingest_patterns is the SSOT after import; no live .gitignore dependency"
+        - "Registration runs the initial ingest (full re-hash) and writes the trie file"
+        - "Clear error on non-existent root path or duplicate name"
+        - "Re-ingest is idempotent and exposed as a function export and watch call"
+        - "Recursive walk from repos.path using the ignore crate for gitignore-style pattern matching"
+        - "Gitignore syntax: *, **, ?, directory/, !negation; negation re-includes previously excluded files but a file under an excluded directory cannot be re-included"
+        - "Empty pattern list means no filtering (ingest everything except .git/)"
+        - "Excluded directories cut during the walk (never descended)"
+        - "Symlinks not followed; the link itself is an ordinary leaf whose content is the link target string"
+        - ".git/ directory excluded unconditionally"
+        - "Produces the ingest trie: one leaf per included file with its BLAKE3 content hash"
+        - "Ingest report: file count, files whose head matches a current extraction pattern (committed enrichments)"
+        - "flatten repo add, repo ls, repo tree, repo edit, repo reingest, repo history, repo rollback, repo rm call flatten-core functions; repo tree <name> --json prints the trie's paths"
+      verification:
+        - "flatten repo add fixtures/repo-a --name repo-a --pattern 'node_modules/' --pattern '*.log' exits 0; flatten repo tree repo-a --json lists no node_modules or .log paths"
+        - "flatten repo add fixtures/repo-a --name repo-a-gi (with .gitignore import enabled); tree matches the set from .gitignore; flatten repo add fixtures/repo-a --name repo-a-raw (no import); tree includes the ignored files"
+        - "Fixture repo-a contains node_modules/ with 1000 files; ingest completes quickly, proving the walk never descends"
+        - "flatten repo add /nonexistent --name x exits 1 with kind=domain; adding repo-a again exits 1 with a duplicate-name error"
+        - "cargo test -p flatten-core ingest::patterns covers negation, directory cut, the re-include rule, symlink leaf hashing its link text, and config ejection (.gitignore import then stored list as SSOT)"
+      notes: >
+        IN-002 (gitignore integration) from the old backlog is absorbed here.
+        Config ejection (ADR-029) means .gitignore import is part of
+        registration, not a layered runtime dependency. s2 adds
+        diff-against-current and re-import actions.
+        F-44: EXCLUDE basis and overlap checks are underspecified in the design;
+        note as implementation decision.
+
+  export-pipeline:
+
+    EX-001:
+      story: >
+        As a developer, I can write a block-structured build recipe as text,
+        have it parsed into an executable structure, and persist it as a versioned
+        row, so that recipes are portable files and stored history at once.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Grammar documented in docs/RECIPE.md: line-oriented, # comments, backslash continuation, double-quoted args with escapes, ${NAME} substitution, significant indentation for nesting, blocks opened by trailing :"
+        - "Recipe-level instructions (execute in file order): ARG name[=default], COPY_DEFAULT_WITH [transforms], SOURCE <repo>:, RUN <transform> [--only <glob>...], INVOKE <recipe>[@N] [name=value ...], WATCH:"
+        - "SOURCE is a block containing COPY blocks; a COPY outside a SOURCE is a parse error"
+        - "COPY <src> <dest> AS <key>: block inside SOURCE; AS <key> mandatory; keys unique across the expanded recipe (collision at expansion time is a parse error)"
+        - "Inside COPY: EXCLUDE <pattern>... (gitignore-style, including EXCLUDE --binary); OVERRIDE_WITH [transforms] (replaces COPY_DEFAULT_WITH for this block; OVERRIDE_WITH [] means no transforms)"
+        - "WATCH: optional block; contains DEPTH_TOLERANCE <n> (default 2) and OVERRIDE: sub-block with per-key reverse chain overrides"
+        - "COPY_DEFAULT_WITH sets the default per-file transform chain; sequential (absent = empty, second declaration overrides); scoped to the declaring recipe (invoked recipes don't inherit)"
+        - "Every transform in a COPY chain must be a file transform"
+        - "ARG defaults may reference earlier ARGs; resolution order: recipe default -> binding arg_values -> --arg NAME=value on CLI"
+        - "INVOKE <recipe>[@N] [name=value ...]: expands into current execution; self-contained (own SOURCEs, own COPY_DEFAULT_WITH); ARG binding: explicit name=value -> caller's ARG of same name -> invoked recipe's default; required ARG still unbound is an error naming both recipes; invoked ARGs local; depth limit 100; cycle detection via visited set keyed by (build_recipe_id, resolved_version)"
+        - "RUN <transform>[@N] [--only <glob>...]: applies a directory transform; @N pins version; --only filters the folder view"
+        - "Every SOURCE name, COPY path, EXCLUDE pattern, RUN arg, and INVOKE value substituted before validation (rules recorded post-substitution)"
+        - "Parse output: Recipe { args, instructions (flattened, INVOKEs expanded), watch_config (depth_tolerance, overrides), invoked_versions }; every instruction carries its position; every parse error carries line and column"
+        - "Lint (warnings only, never errors): non-reversible transform in a COPY chain; enrichment-injection without enrichment-trim as its reverse; WATCH OVERRIDE differs from derived reverses; directory transform declares reverses"
+        - "Persist: insert build_recipes row and build_recipe_versions version 1 with source; set current_version_id in same transaction"
+        - "flatten recipe add <file> --name, recipe new <name> (from shipped generic text), recipe show <name> [--json|--raw], recipe args <name>, recipe edit <name> <file>, recipe history <name>, recipe rollback <name> <version>, recipe ls, recipe rm, recipe lint <name>"
+        - "Edit: insert version N+1, move pointer; text stored verbatim, comments and formatting preserved"
+        - "Clear error on duplicate recipe name, unknown instruction (with line number)"
+      verification:
+        - "flatten recipe add fixtures/recipes/basic.recipe --name basic exits 0; flatten recipe show basic --json prints the ordered instruction list with SOURCE blocks containing COPY blocks with AS keys"
+        - "flatten recipe add fixtures/recipes/bad-*.recipe each exit 1 with line:col: unknown instruction, ../ in dest, COPY outside SOURCE, INVOKE cycle, INVOKE with unbound required ARG, duplicate COPY key"
+        - "flatten recipe lint fixtures/recipes/misorder.recipe (COPY chain missing enrichment-injection) prints the round-trip warning"
+        - "flatten recipe add fixtures/recipes/invoke.recipe (INVOKE base repo=repo-a) then flatten recipe show invoke --json prints base's instructions expanded with the invoked recipe's version id"
+        - "flatten recipe new demo then flatten recipe args demo --json shows repo as required"
+        - "flatten recipe show basic --raw prints the source byte-identical to the input file"
+        - "cargo test -p flatten-core recipe::parse covers quoting, continuation, ${ARG} substitution, ARG-in-default, COPY inside SOURCE nesting, AS key uniqueness, COPY_DEFAULT_WITH and OVERRIDE_WITH resolution, WATCH block parsing, DEPTH_TOLERANCE, OVERRIDE chain parsing, INVOKE binding order, --only parsing"
+      notes: >
+        F-17: shipped recipe colon grammar (optional for childless blocks) to
+        be settled during parser implementation. F-22: lexical rules subsection
+        in grammar contract to be documented in RECIPE.md. F-31: committed
+        comment "line" should be "span" in the enrichment contract.
+
+    EX-002B:
+      story: >
+        As a developer, every transform runs as a JavaScript module against the
+        run folder inside a sandboxed runtime, so that builtins and my own
+        transforms share one execution model.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Two transform types: file (apply(file, args, ctx) with read/write API) and directory (apply(folder, args, ctx) with list/read/write/move/remove API)"
+        - "Module metadata (cached on transforms row at save): name, scope (file|directory), curation (builtin|custom), reverses (optional, file scope only)"
+        - "Resolution: RUN <name>[@N] or COPY chain [name[@N] ...]; @N pins version, absent follows current_version_id; unknown name or version is an error before execution starts"
+        - "folder.list() sorted by /-joined relative path in byte order, filtered by --only scope"
+        - "folder.read(path) returns string (UTF-16), folder.write(path, content), folder.move(from, to), folder.remove(path)"
+        - "File transform API: read() returns string, write(content), rename(name)"
+        - "Every path resolved and must stay inside the run folder; ../, absolute, and backslash paths rejected with an error naming the transform; write never follows links"
+        - "Sandbox: no filesystem outside run folder, no network, no process, no timers; transform imports (one transform calling another) supported as s1 capability (ADR-033); mechanism settled during implementation"
+        - "Fresh QuickJS context per invocation; no global survives from one invocation to the next"
+        - "Date.now and Math.random replaced with deterministic implementations seeded from input hash and instruction position"
+        - "Per-call timeout (transform_timeout_ms, default 10s) and memory limit (transform_memory_mb, default 256MB)"
+        - "A throw or limit breach fails the export with module name, line, and message"
+        - "ctx.args, ctx.only_globs (directory transforms), ctx.repos (id->name), ctx.log(msg), ctx.context.note(key, value) (context accumulator), ctx.render(template[@N], params) (MiniJinja host call)"
+        - "The same (source, args, input folder) produces byte-identical output across two runs"
+        - "flatten transform add <file.js> --name <n> [--reverses <n>]; flatten transform ls, transform run <file.js> <folder>, transform rm, transform reset <name> (builtin reset-to-shipped)"
+      verification:
+        - "flatten transform run fixtures/transforms/upper.js fixtures/tree-a --json prints the resulting folder listing; running twice prints identical output"
+        - "fixtures/transforms/loop.js exits 1 with a timeout error; escape.js (writes ../x) exits 1 naming the transform; globals.js run twice shows no state carried"
+        - "flatten transform add fixtures/transforms/upper.js --name upper then flatten transform ls --json lists it as custom version 1; a recipe with RUN upper exports"
+        - "flatten transform rm enrichment-injection exits 1 with the builtin protection error"
+        - "cargo test -p flatten-core transform::runtime covers arg validation, sorted and scoped list order, path rejection, deterministic output, file vs directory API enforcement"
+      notes: >
+        F-50: QuickJS context-per-invocation memory measurement to be done
+        during implementation to validate the 256MB default. F-23: transform
+        metadata and arg schema (exported meta object) to be settled during
+        implementation.
+
+    EX-006:
+      story: >
+        As a developer, every exported text file carries its destination path as
+        enrichment rendered from a typed template set, and a paired transform
+        strips it again, so that watch can always tell where a file belongs.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Template engine: MiniJinja; templates.kind is enrichment or file; {% if %} and {% for %} allowed only in file-kind templates"
+        - "Templates read from template_versions.source at current or pinned version; missing name or version is an error"
+        - "An enrichment template set (kind=enrichment) is stored as a single YAML document in template_versions.source; each entry has: filename regex (anchored at right end, longest match wins), open/close markers, reserved-prefix rule, syntax-safe flag, and an optional body override; a per-set default body applies where an entry has none"
+        - "Every body must be linear: only literal text and {{ }} variables, and {{path}} exactly once; a save that violates this is rejected"
+        - "Extraction pattern per (template_version, entry): escaped markers wrapping the body pattern (literals escaped, other variables as non-greedy wildcards, {{path}} as capture group); exposed as a flatten-core function used by watch detection and enrichment-trim"
+        - "Save-time validation for enrichment templates: render sample paths per entry (including paths containing every body literal, nested, dotfile, and unicode paths) and extract each through the derived pattern; a miss rejects the save"
+        - "Shipped template set default (enrichment) with entries: # (py, yaml, yml, toml, sh, Makefile, Dockerfile, .gitignore, LICENSE, NOTICE, AUTHORS, COPYING), // (ts, tsx, js, jsx, rs, go, c, h, cpp, java), <!-- --> (md, html, xml), -- (sql), /* */ (css), JSON path field (json, jsonc; syntax-safe=false)"
+        - "Shipped body carries a distinguishing literal (e.g. `flatten: {{path}}`) so a bare first-line comment in a repo never matches"
+        - "Shipped template context-manifest (kind=file): MiniJinja template for _CONTEXT.yaml"
+        - "enrichment-injection (file transform, --template-set <name>, default 'default'): injection is the file's dest_path rendered through the matching entry's body between its markers; insertion after the entry's reserved-prefix rule (shebang, use strict, <?xml, YAML ---, Markdown front matter, Python encoding cookie, /// <reference>, # syntax=); idempotent replace (never stack); line ending detected from file's first newline; BOM preserved; JSON entry inserts top-level path field after opening brace with detected indent (arrays and unparseable JSON skipped and logged)"
+        - "--reversible=false tells watch to leave enrichment in place on return; allowed only for syntax-safe entries"
+        - "Files matching no entry skipped and listed as will-not-round-trip; binary files untouched"
+        - "enrichment-trim (file transform, declares reverses: enrichment-injection): removes whichever extraction pattern matched; needs no knowledge of which injection version or args ran; leaves files matching no pattern unchanged"
+        - "flatten template add, template ls, template show, template edit, template history, template rollback, template reset, template rm"
+      verification:
+        - "cargo test -p flatten-core transform::enrichment property tests: inject(inject(f)) == inject(f); trim(inject(f)) == f; both hold for every shipped entry, for CRLF and BOM variants"
+        - "Table test: one file per reserved-prefix case asserts enrichment lands on the documented line"
+        - "fixtures/repo-a/tsconfig.json (JSONC) round-trips byte-identical except for the added field"
+        - "Edit default body; save succeeds; nonlinear body ({% if %}); save rejected; add a .vue entry; save succeeds"
+        - "flatten export on a basic recipe produces files whose enrichment, extracted through the derived pattern, equals the file's dest_path"
+      notes: >
+        F-33: JSON enrichment key collision (distinctive key) to be handled by
+        the distinguishing literal in the shipped body. F-34: read window vs
+        long reserved prefixes; the window derivation must account for the
+        longest possible reserved prefix plus path length. F-44:
+        enrichment-template versions are exempt from auto-prune per the
+        versioning contract.
+
+    EX-003:
+      story: >
+        As a developer, I can flatten paths into filenames and pack output, so that
+        each platform gets the format it needs.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "RUN flatten (directory transform): moves each file to its encoded dest_path via folder.move; --delimiter <str> (default --)"
+        - "Enrichment inside the file preserves dest_path after the move; flatten never edits content"
+        - "Percent-encoding for injectivity: % first, then delimiter literal in a segment, then leading _, then characters illegal on any target OS"
+        - "Dotfile mapping after encoding: leading . on any segment becomes _; real leading _ already encoded so .env and _env cannot collide"
+        - "NAME_MAX handling: names over 255 UTF-8 bytes truncated with BLAKE3 hash suffix; warned"
+        - "Windows reserved names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) and trailing dot/space warned"
+        - "Records delimiter and encoding convention in context accumulator"
+        - "RUN pack (directory transform): merges files into fewer output files; --file-limit N (hard cap, N=1 for single), --byte-limit N (best-effort)"
+        - "Sequential fill in alphabetical dest_path order; --file-limit wins when both set; last file absorbs overflow with warning"
+        - "--format xml (Repomix convention; CDATA with ]]> split; control characters stripped and warned) or markdown (fence length one longer than longest backtick run)"
+        - "Binary files skipped with warning"
+        - "Pack files are emitted (ledger: remove-then-write); packed sources' dest_paths still resolve through rules because enrichment was injected before packing"
+      verification:
+        - "cargo test -p flatten-core transform::flatten property test: the flat name is injective over dest_paths containing %, the delimiter, leading dots, leading underscores, non-ASCII, and reserved names"
+        - "fixtures/repo-c with backtick and CDATA content: RUN pack with --format markdown and --format xml both round-trip through their respective parsers"
+        - "flatten export with RUN flatten produces flat files whose enrichment equals their pre-flatten dest_path"
+
+    EX-004:
+      story: >
+        As a developer, I can compose several sources into one run folder and
+        describe the result to the AI, so that multi-source projects produce one
+        coherent export.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Instructions execute in file order on one run folder; multiple SOURCE blocks switch which repo COPYs read from"
+        - "Overlap: a write onto a path already in the run folder is last-wins; the run report names both COPY keys; recorded in context"
+        - "Scoped RUN: --only globs filter folder.list(); a transform never sees or touches files outside its scope"
+        - "INVOKE at run time: expanded instructions run as if inline; the run records their positions and every invoked recipe's version id"
+        - "ctx.context.note(key, value) appends to a run-scoped log ordered by (instruction_position, path); COPY records source, src, dest; EXCLUDE records removed paths; builtins record their decisions"
+        - "RUN context-manifest renders the accumulated context to _CONTEXT.yaml through the context-manifest template (kind=file); --template <name[@N]> selects; opt-in (only runs if recipe includes RUN context-manifest)"
+        - "Default template documents: encoding convention, dotfile mapping, enrichment convention with exact form, exclusion log, instruction to preserve enrichment, repo-name statement"
+        - "context-manifest written as an emitted file"
+      verification:
+        - "flatten export on fixtures/recipes/stack.recipe (two SOURCEs copying README.md to same path) yields the second one and an overlap warning"
+        - "flatten export on fixtures/recipes/scoped.recipe (RUN upper --only vendor/**) upper-cases only files under vendor/"
+        - "_CONTEXT.yaml from fixtures/recipes/context.recipe contains exclusion list, rendered enrichment form, and repo-name statement"
+        - "cargo test -p flatten-core export::compose covers execution order, overlap reporting, scope filtering, context ordering"
+
+    DA-005:
+      story: >
+        As a developer, I can activate a recipe with a binding from the CLI, so
+        that export and watch have something to run before any GUI exists.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Create a binding for a recipe with --arg NAME=value for each required ARG; a missing required ARG is an error; optional version_pin; active defaults to true"
+        - "Export folder derived at runtime as {app_data}/export/binding-{id}/{uuid}/; not stored on the binding row"
+        - "Edit a binding: change version_pin or arg_values; activate and deactivate toggle active and bump change_counter; neither touches existing flags or candidates (frozen)"
+        - "Delete a binding: cascades export_state (cascades safety_findings), sets null on watch_match_candidates.pipeline_binding_id (frozen); removes binding's export directory; bumps change_counter"
+        - "Soft-delete guard on parent entities: soft-deleting a repo or recipe with active bindings is a domain error naming the bindings"
+        - "Display discovered repos (SOURCE names from the parsed recipe after substitution, resolved to repos rows; unknown names shown as errors)"
+        - "flatten binding add, binding ls, binding rm, binding activate, binding deactivate, binding pin, binding set-arg"
+      verification:
+        - "flatten binding add shipped-default --arg repo=repo-a --json returns id and arg_values"
+        - "flatten binding add shipped-default exits 1 naming the missing required ARG repo"
+        - "flatten binding deactivate <id>; flatten db query 'select counter from change_counter' shows bumped value"
+        - "cargo test -p flatten-core binding:: covers create, activate, deactivate, delete cascade, and the soft-delete guard"
+      notes: >
+        The old backlog stored export_dir on the binding; the design derives it
+        at runtime. No export_root setting exists; paths resolve under app data.
+
+    EX-005:
+      story: >
+        As a developer, re-exports that change nothing are a no-op, the export
+        folder is managed for me, and every export records how it was made,
+        so that I never ship stale content and watch always knows the lineage.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "flatten export <binding_id> [--arg NAME=value] [--force] [--dry-run] [--json]"
+        - "Resolve binding -> recipe version (version_pin or current_version_id), parse with INVOKEs expanded, resolve ARGs; a missing required ARG is an error before anything runs"
+        - "Re-ingest every SOURCE repo so tries are current; pin an Arc of each for the duration of the run"
+        - "Per-binding lock file at {app_data}/export/binding-{id}/.lock; acquired at start, released at end; a second export of the same binding while held returns domain error 'export already running for binding N'; different bindings export concurrently"
+        - "Short-circuit: compare runtime_inputs (resolved ARGs + copy_size_limit_mb + binary_extensions), repo_root_hashes (repo_id -> trie Merkle root), resolution_rules (per COPY key: repo, prefixes, excludes, forward chain with versions), and runtime_versions (recipes, directory transforms, template sets, depth_tolerance) against the export_state row"
+        - "All equal: report unchanged (show compared values); user chooses accept (no-op, update last_used_at) or force (proceed to full export)"
+        - "Any differ or no prior run: full export"
+        - "Start-of-run cleanup: delete orphan directories under binding folder that don't match export_state.output_dir"
+        - "Create fresh export directory binding-{id}/{uuid}/"
+        - "COPY copies bytes from repo to run folder; hash from disk vs pinned trie: mismatch warns and updates snapshot; file in trie but absent on disk fails the instruction; files above copy_size_limit_mb skipped with warning"
+        - "Symlink leaves written as regular files containing link target string; run folder verified to contain no links before swap"
+        - "On success: replace export_state row with output_dir, resolution_rules (per COPY key: repo, src_prefix, dest_prefix, excludes, forward_chain, derived_reverse_chain, override_chain), runtime_versions (recipes, directory transforms, template sets, depth_tolerance), runtime_inputs, repo_root_hashes; delete previous export directory"
+        - "On failure: delete new directory; previous export directory and row stay"
+        - "Crash recovery on startup: delete any directory under binding-{id}/ not matching export_state.output_dir"
+        - "Overlap check: compare run's COPY dest prefixes against other active bindings' recorded rules; overlapping prefixes from different repos warned naming the other binding"
+        - "Bump change_counter on success"
+        - "--dry-run runs into a new directory, reports diff against previous export, deletes without replacing"
+        - "Run report: written, unchanged (short-circuit), deleted, warnings (will-not-round-trip, overlap, hash mismatches, size-limit skips), errors (absent files, transform failures), durations (per-instruction and per-phase)"
+      verification:
+        - "flatten binding add shipped-default --arg repo=repo-a then flatten export <id> twice; second run reports unchanged"
+        - "Edit one file in fixtures/repo-a; re-export runs everything and repo_root_hashes changes"
+        - "Start two flatten export processes on one binding; second exits 1 with 'export already running'"
+        - "Delete one file from the export folder; re-export detects the difference, runs, and restores it"
+        - "flatten export --json shows resolution_rules with per-key forward_chain and derived_reverse_chain"
+        - "cargo test -p flatten-core export::run covers the per-binding lock, short-circuit, start-of-run cleanup, crash recovery, and change_counter bump"
+      notes: >
+        F-03: interactive short-circuit prompt (export returns Unchanged,
+        shell/GUI prompts for force). The flatten-core function returns an enum;
+        the CLI and GUI handle the prompt. F-51: dest_path hardening (control
+        chars, length, reserved names, case) to be enforced at COPY time;
+        settle during implementation.
+
+  watch-pipeline:
+
+    WA-001:
+      story: >
+        As a developer, I can start one watch session that knows every active
+        export, so that any file I download resolves against what I actually
+        exported.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "settings.watch_source_dir is the one source directory; OS-detected download paths surfaced as suggestions when unset; clear error if it does not exist"
+        - "One session per process; PID file at {app_data}/watch.pid written at start, deleted on clean stop"
+        - "Poll and settle intervals read from settings with documented defaults"
+        - "For every binding with active=true and an export_state row: load resolution_rules (per-key: rules, derived_reverse_chain, override_chain), runtime_versions (template_sets, depth_tolerance); bindings without an export_state row listed in start report and contribute nothing"
+        - "Extraction patterns: one per (template_version, entry) derived from every version of every enrichment template set, current or not"
+        - "Active repos: union of repo ids named by loaded rules; every active repo re-ingested at session start (full re-hash; never trusts the .trie file after a crash)"
+        - "Export folder basename index: built at session start from each active binding's export folder on disk; re-indexed on pipeline config changes"
+        - "Session start report: per binding (loaded with rule count, or no export state yet), per repo (loaded, re-ingested, or path missing), pattern count, generation number; one failing repo does not abort the session"
+        - "flatten watch start, watch stop (sends SIGTERM via PID file on Unix, writes stop-request file cross-platform), watch status (PID liveness, running counters, generation, rule count, pattern count)"
+      verification:
+        - "With two active bindings for repo-a, flatten watch status --json shows both rule sets and one active repo"
+        - "Remove fixtures/repo-b from disk; flatten watch start exits 0, report shows repo-b path missing"
+      notes: >
+        F-41: reload timing vs in-flight file; reloads occur between files,
+        never mid-placement. F-49: watch_after_place setting
+        (keep/delete/trash) is a v2 concern; s1 always deletes.
+
+    WA-002:
+      story: >
+        As a developer, the watcher detects new files via native filesystem events,
+        so that downloaded AI output enters the pipeline with sub-second latency.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Watch source directory via notify 8.x with notify-debouncer-full, non-recursive"
+        - "Create, modify, and rename-to events on a non-partial name produce a candidate"
+        - "Remove events ignored"
+        - "Configurable debounce timeout (watch_debounce_ms)"
+        - "Partial-download suffixes shared with WA-003: .crdownload, .part, .download, .partial, .tmp"
+        - "Settle check shared with WA-003: size and mtime unchanged across consecutive checks and size non-zero"
+        - "rescan-required signal from notify triggers WA-003's immediate full scan"
+        - "Listener runs on its own thread; hand-off via channel, never a blocking call"
+      verification:
+        - "cargo test -p flatten-core watch::notify translates synthetic notify::Event values into candidates: rename-to yes, .crdownload no, Remove ignored, rescan flag set"
+        - "Integration test (feature-gated, all three OSes in CI): copy a fixture into the source dir, observe a candidate within the debounce window"
+
+    WA-003:
+      story: >
+        As a developer, a periodic reconciliation sweep catches files that notify
+        missed, so that event loss never means silent data loss.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Timer-driven directory sweep at configured interval (default 30s), newest mtime first"
+        - "Session scope: only files whose mtime is after session start are candidates"
+        - "Seen-set key: (source_path, size, mtime); hit skips detection; same path with new size or mtime examined again"
+        - "Reconciliation: a download whose normalized basename (strip browser dedupe suffixes ' (1)', ' (2)' and appended .txt) matches an exported file's basename and whose BLAKE3 hash equals that file's hash is skipped as unchanged re-download"
+        - "Export folder index built at session start and re-indexed on state reload"
+        - "Partial-download suffixes and settle check shared with WA-002"
+        - "Immediate full scan on notify's rescan-required signal"
+        - "Sweep and detection run on the session thread (serial per ADR-039)"
+      verification:
+        - "Drop a fixture into source dir; one flag appears; second sweep adds nothing"
+        - "Re-download an exported file unchanged; sweep logs reconciliation skip"
+        - "Place a file before starting watch; start; file never evaluated; touch its mtime; evaluated"
+      notes: >
+        F-35: reconciliation on notify path; skip no-op placements (notify
+        sees files the sweep already handled). F-39: unsettled download
+        re-queue; a file that fails the settle check should be re-examined on
+        the next sweep, not forgotten.
+
+    WA-004:
+      story: >
+        As a developer, the watcher determines where a file belongs from the rules
+        my exports recorded, so that placement is accurate, ambiguity is flagged,
+        and nothing is guessed.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Read file head: window derived from longest rendered pattern plus buffer for reserved prefix and path length; decode as lossy UTF-8; strip BOM, NBSP->space, ZWSP and soft hyphen removed; binary (null byte in window) rejected as skip"
+        - "Match against extraction patterns from all template set versions; downloaded filename extension is not used; match yields dest_path and the pattern that matched (passed to WA-011)"
+        - "No pattern matches: skip (not our file; no enrichment = skip per ADR-031)"
+        - "Extracted dest_path normalized: ./ stripped, backslash to /, trailing whitespace trimmed; absolute paths and .. segments rejected"
+        - "Per-binding resolution: for each active binding with an export_state row, evaluate its recorded resolution_rules per COPY key against dest_path"
+        - "COPY matching: prefix match (src_prefix empty or either prefix ends with /) is anchored, segment-aligned (frontend/ matches frontend/x but not frontend2/x); exact match (neither prefix empty, neither ends with /); yields (repo, source_path)"
+        - "Trie validation: count missing path levels (file + parent directories) against depth_tolerance from export_state.runtime_versions; within tolerance: candidate; exceeds: set aside as new_directory"
+        - "Merge: candidates agreeing on (repo_id, source_path, resolved_reverse_chain) from any binding = one claim; same target but different reverse chain = ambiguous"
+        - "Decide: one claim places; multiple claims flag ambiguous; zero claims with reasons flag highest-precedence reason; zero claims with no reasons flag unroutable"
+        - "Flag types: ambiguous, new_directory, unroutable (only three types)"
+        - "Flag write: one transaction; insert watch_match_flags row (flag_type, content blob, source_path, extracted_path); insert one watch_match_candidates row per active binding (status: ok, exceeds_depth, excluded, or no_match; target_path nullable when excluded or no_match; copy_key nullable; resolved_reverse_chain frozen from export_state; template_set_version)"
+        - "Each detection creates a new independent flag row (ADR-044); no content_hash, no replacement logic; same filename + same size/mtime = seen-set skip; same filename + different size/mtime = new flag"
+        - "Pass or fail; nothing ranks; an exact match and a one-level-new match are peers"
+        - "Emitted files (dest_path listed in export_state emitted paths) skipped without detection"
+        - "flatten flag ls, flag show, flag dismiss, flag approve <id> <candidate>, flag explain <file>"
+      verification:
+        - "Rules COPY . repo-a/: a file with enrichment repo-a/src/new.rs (no leaf) resolves because src/ exists; repo-a/a/b/c/d.rs flags new_directory at depth 2"
+        - "Two bindings for repo-a same rule: file resolves to one target, no flag; two bindings different templates still one claim"
+        - "Two bindings from different repos for same path: ambiguous flag with two candidate rows"
+        - "A file with no enrichment is skipped (not flagged)"
+        - "flatten flag explain <file> runs detection without placing and prints every rule evaluated, every candidate with status, matched pattern, and reverse chain"
+        - "cargo test -p flatten-core watch::detect table tests: enrichment in each shipped entry, enrichment after shebang, after front matter, .txt-renamed, CRLF, BOM, binary rejected, absolute path rejected"
+
+    WA-011:
+      story: >
+        As a developer, placed files have the export's enrichment removed and
+        custom transforms reversed before they touch my repo, so that the
+        round-trip is clean.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Read override_chain from resolution_rules for this COPY key in export_state; if present, run the override chain (steps 2-3 skipped)"
+        - "If no override: enrichment-trim runs with the matched pattern from WA-004, unless the COPY block recorded --reversible=false (enrichment left in place)"
+        - "Derived reverse: run derived_reverse_chain from resolution_rules (forward chain reversed, each reversible transform at its recorded version and args; non-reversible transforms already excluded at recording time)"
+        - "Committed comment preserved: if the file already on disk at the target begins with a line matching an extraction pattern, that line is re-added after the chain"
+        - "Line-ending policy: per-repo setting (repos.line_ending_policy): preserve (match existing target file, LF for new) or lf (always LF)"
+        - "All chains read from export_state record, never from live recipes or transform rows (ADR-041)"
+        - "Reverses run through EX-002B runtime on a one-file temp folder"
+        - "A failing reverse fails the placement (logged, counted as error); source file stays"
+        - "Output is bytes handed to WA-005; WA-011 never writes to the repo"
+      verification:
+        - "cargo test -p flatten-core watch::reverse: export fixtures/repo-a through basic recipe, feed each output through WA-011, assert byte-identical to repo original"
+        - "fixtures/repo-legacy with committed # path comments: export, return every file, assert byte-identical"
+        - "Edit default after export; returned files still trim correctly (patterns from all versions)"
+        - "Custom transform pair (upper/lower with reverses: upper) round-trips byte-identical; with --only vendor/** a non-vendor file returns untouched"
+        - "CRLF repo file: returned CRLF when target exists; new file with no target returns LF"
+
+    WA-005:
+      story: >
+        As a developer, resolved files are written to the correct repo path and the
+        source is cleaned up, so that AI output lands where it belongs without
+        accumulating handled files.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "Atomic write via tempfile (.flatten-tmp-* prefix in target directory) + rename; stray .flatten-tmp-* files removed at watch start and excluded from ingest"
+        - "Placement hardening: canonicalize target path's parent directory; if canonical path is outside repo root, refuse (error; catches symlinks created after last ingest)"
+        - "Existing target's mode preserved; new files get umask default plus executable bit when content starts with shebang; placing over a symlink leaf replaces the link with a regular file"
+        - "Parent directories created up to the approved depth; never beyond"
+        - "Windows sharing violations retried with backoff (3 attempts) before counting as error"
+        - "Placed file re-hashed and repo trie updated via copy-on-write (Arc::make_mut); placement that created a directory bumps change_counter; persistence debounced"
+        - "Running counts: placed, skipped, flagged, errors; exposed by flatten watch status"
+        - "Delete source file from source directory after successful write; cleanup failure logged as warning"
+        - "Only placed files cleaned up; flagged, skipped, errored files remain"
+      verification:
+        - "Drop fixture into source dir; lands at correct repo path byte-identical, download gone, watch status shows placed=1"
+        - "With depth_tolerance=2, file under repo-a/src/newmod/sub/x.rs lands with both directories created; at depth 1 it flags new_directory"
+        - "Kill watch between tempfile write and rename; restart; stray .flatten-tmp-* gone"
+      notes: >
+        F-40: orphan tmp files, migration backup, corruption check,
+        skip-with-error; the .flatten-tmp-* cleanup at watch start handles
+        orphan temps. F-51: dest_path hardening (control chars, length, reserved
+        names, case) enforced at COPY time in EX-005; watch trusts the recorded
+        rules.
+
+    WA-006:
+      story: >
+        As a developer, watch reloads its state when pipeline configuration
+        changes in another process, so that CLI exports and binding changes
+        are picked up without restarting.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "change_counter table polled on the trie-refresh timer (default 30s); if changed since last check, watch reloads resolution rules, template sets, and basename index"
+        - "In-process triggers (export success, binding change, pointer move) fire immediately as a latency optimization; redundant with the cross-process poll"
+        - "Reload triggers per the Watch resolution state contract: session start (everything), trie refresh (repo tries only), change_counter change (rules, templates, index), export success (rules, templates, index), binding activate/deactivate/delete (rules, templates, index), pointer move (template sets only), repo registration/delete (tries), new directory during placement (tries only)"
+        - "A reload never re-detects pending files or flags"
+        - "Reloads occur between files, never mid-placement"
+      verification:
+        - "Start watch; run flatten export from a second process; watch status shows generation incremented within 30s"
+        - "Deactivate a binding via CLI; watch status shows its rules gone after the next timer tick"
+        - "cargo test -p flatten-core watch::reload covers change_counter polling and state reload"
+      notes: >
+        F-41: reload timing vs in-flight file. The contract is: reloads
+        happen between files, never mid-placement.
+
+  data-and-auditability:
+
+    DA-004:
+      story: >
+        As a developer, every config edit is versioned and rollbackable, so
+        that I can review changes and recover from bad configurations.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "Three entities use pointer-based versioning (build_recipes, transforms, templates): edit inserts version N+1, moves current_version_id; rollback moves pointer to a previous version; version rows immutable; (parent_id, version) unique; current_version_id never null after commit"
+        - "repo_versions is append-only: each config edit appends a row snapshotting ingest_patterns, line_ending_policy (and safety_allowlist in s2); rollback restores old values and appends a new history row"
+        - "Diffs computed on the fly from adjacent version sources (imara-diff), never stored"
+        - "Builtin rows: edit allowed, delete refused; restore-from-shipped inserts the embedded shipped content as a new version and moves pointer"
+        - "Not prunable: current, pinned by any binding, referenced by export_state (via runtime_versions JSON), file_history, or watch_match_candidates; enrichment template versions exempt from auto-prune"
+        - "Every pointer move (edit, rollback, restore, upgrade) bumps change_counter"
+        - "CLI: flatten recipe edit, recipe history, recipe rollback; transform edit, history, rollback, reset; template edit, history, rollback, reset; repo history, repo rollback"
+      verification:
+        - "cargo test -p flatten-core versioning:: covers edit, rollback, pinned-version protection, builtin delete refusal, restore-from-shipped"
+        - "flatten recipe edit basic fixtures/recipes/basic-v2.recipe then flatten recipe history basic --json shows versions 1 and 2; rollback basic 1 moves pointer"
+      notes: >
+        F-12: version row deleted_at; the design includes deleted_at on
+        build_recipe_versions and transform_versions; define semantics or drop
+        during implementation. F-32: overlapping version patterns (longest
+        match wins) is already the enrichment contract.
+
+    DA-003:
+      story: >
+        As a developer, every placement and export write is recorded with a
+        snapshot+diff chain, so that I can review what the AI changed.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "file_history records only placed files: files written to a repo by watch, or written to the export directory by export (ADR-040); skips, flags, and errors are not file_history entries"
+        - "placed_by: export, watch_auto, or watch_manual (ADR-040); replaces the old pipeline + detection_method columns"
+        - "Chain key: (placed_by, repo_id, file_path); export and watch chains separate"
+        - "First entry per chain is a full snapshot; every 5th entry is a snapshot; others are diffs against previous"
+        - "Content is post-transform (final state placed in repo or written to output)"
+        - "repo_id nullable for packed/emitted files; build_recipe_version_id nullable with ON DELETE SET NULL"
+        - "Rollback: reconstruct content from nearest snapshot + diffs forward, write to repo, append new entry with null build_recipe_version_id"
+        - "flatten history show <repo> <path> and flatten history rollback <repo> <path> <entry>"
+      verification:
+        - "cargo test -p flatten-core history:: reconstructs content at every entry of a 12-entry fixture chain"
+        - "Place three versions of one file via watch; flatten history show repo-a src/main.rs --json shows snapshot, diff, diff with placed_by populated"
+
+  desktop-app:
+
+    APP-001:
+      story: >
+        As a developer, I can activate recipes through pipeline bindings in the
+        GUI, so that I control which recipes export and which my watch serves.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "Tauri commands over DA-005 flatten-core binding functions: create, edit, activate, deactivate, delete"
+        - "Binding creation prompts for every required ARG of the chosen recipe"
+        - "Tauri managed state holds the DB handle (writer channel plus reader pool); commands never hold a Connection across an await"
+        - "Errors are a flatten-core thiserror enum, serialized to the frontend as structured JSON"
+      verification:
+        - "Tauri dev: create a binding on shipped-default; the prompt asks for repo; the resulting row matches flatten binding ls --json"
+
+    APP-002:
+      story: >
+        As a developer, I can trigger exports and turn the watch on and off from
+        the GUI, so that I operate the app without the CLI.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "Trigger export per binding as a background task; per-binding lock rejects concurrent with a clear message"
+        - "Progress streamed via Tauri events, batched"
+        - "Display run report on completion and export folder path with open-folder action"
+        - "Start and stop the single watch session; status (running, idle, error, generation, counts) queryable"
+        - "Watch events streamed to frontend; pending flag list"
+        - "Activate/deactivate a binding while running bumps change_counter and UI reflects new snapshot"
+        - "Session stopped cleanly on app exit (in-flight placement finishes)"
+      verification:
+        - "Tauri dev: export twice quickly; second shows lock message; toggle watch, drop fixture, observe placement event"
+
+    APP-003:
+      story: >
+        As a developer, I can register repos and configure their ingest rules
+        through the GUI, so that I manage what gets ingested without editing
+        config files.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "Register source by path; name defaults to directory name; calls IN-001 function"
+        - "Configure ingest rules: add/remove glob patterns; preview match set from dry ingest"
+        - "Config ejection: .gitignore import at registration (one-time); diff-against-current and re-import actions (s2)"
+        - "Each save writes repo_versions via DA-004 and triggers re-ingest"
+        - "Soft delete with confirmation; bindings whose recipes SOURCE the deleted name show error state"
+      verification:
+        - "Tauri dev: register fixtures/repo-a, add '*.log' pattern, preview drops .log files, save; repo history shows two versions"
+
+    APP-004:
+      story: >
+        As a developer, I can create and edit build recipes through the GUI,
+        so that I configure exports visually.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "Create from shipped generic recipe or blank; edit as text with live parse (instruction list, ARGs, lint warnings)"
+        - "Structured helpers: add SOURCE, COPY (with AS key), EXCLUDE, COPY_DEFAULT_WITH, OVERRIDE_WITH, RUN, INVOKE, WATCH block"
+        - "Each save inserts new version via DA-004; text stored byte-identical"
+        - "Duplicate, soft delete, list with current version and binding count"
+      verification:
+        - "Tauri dev: create from template, add EXCLUDE, save; recipe show --raw prints edited text; recipe history shows version 2"
+
+    APP-010:
+      story: >
+        As a developer, I can view, edit, version, and roll back every transform
+        and template through the GUI.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "List transforms and templates with scope, curation, current version, and referencing recipes"
+        - "Edit source in a code editor; save creates new version via DA-004; a save that fails runtime validation is rejected"
+        - "Enrichment template editor: entries as table; saves run linearity and render-extract validation"
+        - "Rollback, restore-from-shipped for builtins; delete refused for builtins with explanation"
+        - "Create custom transform or template; duplicate shipped ones"
+      verification:
+        - "Tauri dev: add .vue entry to default, save, export, drop .vue file; watch places it; reset-to-shipped restores"
+
+    APP-005:
+      story: >
+        As a developer, I can review flagged files with every binding's proposed
+        target and resolve them, so that ambiguous or suspicious findings never
+        block my workflow.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "List pending flags newest first; candidates grouped by target showing supporting bindings"
+        - "Approve: pick candidate, run WA-011 reverse, place via WA-005, delete flag"
+        - "Approve (manual for unroutable): user specifies target repo and path"
+        - "Dismiss: delete flag and candidates"
+        - "Flag count badge in navigation"
+      verification:
+        - "Drop ambiguous fixture, open flag review, approve repo-b candidate; file lands, flag gone"
+
+    APP-006:
+      story: >
+        As a developer, I can browse the edit history of any file managed
+        by the pipelines, so that I see how AI-generated iterations evolved.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "Per-file thread view over file_history; export and watch chains as separate tabs"
+        - "Each entry: timestamp, placed_by, recipe version; diff entries as unified diff; snapshot entries show full content"
+        - "View reconstructed content at any entry; rollback button"
+      verification:
+        - "Tauri dev: after DA-003 scenario, thread shows entries and rollback produces a new one"
+
+    APP-007:
+      story: >
+        As a developer, the app runs in my system tray with status and quick
+        actions, so that watch runs in the background without a visible window.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "Minimize to tray; tray icon shows watching vs idle vs error"
+        - "Right-click menu: show window, watch on/off, quit"
+        - "Start-at-login toggle; notification on new flags when minimized"
+      verification:
+        - "Tauri dev on each OS: close to tray, drop file, notification appears, restore"
+
+    APP-009:
+      story: >
+        As a developer, I can control retention for file history and entity
+        versions, so that the database doesn't grow unbounded.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "file_history retention per repo: max age or max entries per chain; pruning re-snapshots before deleting"
+        - "Version retention for recipes, transforms, templates: max versions per entity; not-prunable rules enforced; enrichment template versions exempt from auto-prune"
+        - "Manual prune trigger; display current storage usage"
+      verification:
+        - "Pin a binding to version 1, set retention to 1 version, prune; version 1 survives"
+
+  watch-pipeline:
+
+    IN-004:
+      story: >
+        As a developer, exported files are scanned for secrets and PII, so that
+        sensitive data is caught before it reaches an AI platform.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "Content safety scan runs during the COPY pass at export (ADR-030), piggybacks on reading file bytes"
+        - "Findings written to safety_findings table (CASCADE from export_state); types: secret_detected, pii_detected"
+        - "Flag-only: findings never block the export or mutate content"
+        - "Per-repo safety_allowlist for skipping known findings"
+        - "Resolution in desktop UI (allow via allowlist, or dismiss)"
+      verification:
+        - "fixtures/repo-secrets: export writes findings; re-export with allowlist entry skips it"
+      notes: >
+        Moved from ingest epic to export-time per ADR-030. The old IN-004 scanned
+        at ingest; the design scans at export because that's when files leave the
+        machine.
+
+    WA-015:
+      story: >
+        As a developer, I can tune flag sensitivity, so that common cases place
+        without manual confirmation.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "Per-repo depth tolerance override (global depth_tolerance is per-recipe WATCH block; this adds repo-level override)"
+        - "Settings defaults preserve s1 behavior (flag everything)"
+      verification:
+        - "cargo test -p flatten-core watch::thresholds: fixture decisions at depth 0, 1, 2"
+
+    WA-012:
+      story: >
+        As a developer, the watcher handles zip downloads from AI platforms, so that
+        multi-file exports are placed without manual extraction.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "Detect zip via magic bytes; peek entry headers for enrichment"
+        - "If any entry resolves, extract to temp dir and process each through normal path"
+        - "Zip deleted only when every entry placed; otherwise remains"
+      verification:
+        - "fixtures/downloads/three-files.zip: three placed, zip gone; zip with one unresolvable: two placed, zip remains, one flag"
+
+    WA-013:
+      story: >
+        As a developer, the watcher detects project files copied to my clipboard, so that
+        I can paste from AI chat and have it placed automatically.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "Monitor clipboard text via Tauri clipboard plugin; opt-in toggle"
+        - "Run WA-004 detection on clipboard text head; on resolve: write temp file, process normally"
+        - "No match: ignore silently; no interference with normal clipboard"
+      verification:
+        - "Tauri dev: copy exported text; lands in repo; copy unrelated text; nothing happens"
+
+# --- s3 (v2+) ---------------------------------------------------------------------------
+
+  mcp-server:
+
+    MCP-001:
+      story: >
+        As an AI agent, I can connect to a running Flatten PM app over MCP,
+        so that I access project context without re-uploads.
+      stage: s3
+      status: backlog
+      acceptance_criteria:
+        - "Streamable HTTP endpoint on localhost via rmcp + axum"
+        - "GET /health: unauthenticated, returns server status"
+        - "Static bearer token generated on first launch; written to port/lock file"
+        - "Origin validated when present; Host validated when absent"
+        - "Bound to 127.0.0.1 only; graceful shutdown on Tauri exit"
+        - "Targets stateless MCP spec"
+      verification:
+        - "curl localhost:<port>/health returns 200; tool call without token returns 401"
+
+    MCP-002:
+      story: >
+        As an AI agent, I can read files and search across projects through
+        MCP tools, so that I have current project context.
+      stage: s3
+      status: backlog
+      acceptance_criteria:
+        - "read_file: returns content within a registered repo"
+        - "list_files: returns listing from trie"
+        - "search_across_projects: searches content across all registered repos"
+        - "All tools scoped to registered repos; tool logic behind HTTP endpoint"
+      verification:
+        - "MCP tool call list_files returns trie contents for registered repo"
+
+  forge-daemon:
+
+    FD-001:
+      story: >
+        As a developer, I access MCP tools from all forge projects through one
+        persistent endpoint, so that AI agents connect once.
+      stage: s3
+      status: backlog
+      acceptance_criteria:
+        - "FastMCP daemon with Streamable HTTP on localhost"
+        - "Prefixed tool mounts (flatten.*, convention.*)"
+        - "Structured error when backend not running; notifications/tools/list_changed on backend online"
+        - "Login agent: launchd (macOS), systemd user (Linux), Windows startup"
+        - "Auto-start toggle; stays under client tool caps"
+      verification:
+        - "Start daemon, connect client, list tools; stop backend, tool call returns structured error"
+
+    FD-002:
+      story: >
+        As a developer, Claude Desktop discovers the forge daemon via a .mcpb
+        bundle, so that the stdio requirement is handled transparently.
+      stage: s3
+      status: backlog
+      acceptance_criteria:
+        - ".mcpb bundle installable by Claude Desktop"
+        - "Stdio shim proxies to daemon's localhost Streamable HTTP endpoint"
+        - "Shim discovers daemon port from lock file; clear error if daemon not running"
+      verification:
+        - "Install bundle in Claude Desktop; tool calls succeed through shim"
+
+  desktop-app:
+
+    PLAT-001:
+      story: >
+        As a developer on any of the three desktop OSes, the app behaves the same,
+        so that I trust it with my repos regardless of platform.
+      stage: s3
+      status: backlog
+      acceptance_criteria:
+        - "CI matrix: Linux, macOS, Windows for cargo test and flatten verification commands"
+        - "Watch integration tests on all three"
+        - "rquickjs builds and transform runtime passes on all three"
+        - "Path handling: case-insensitive filesystems, NAME_MAX, reserved names, non-UTF-8"
+        - "Tray, start-at-login, and notification verified per OS"
+      verification:
+        - "CI green on all three platforms"
