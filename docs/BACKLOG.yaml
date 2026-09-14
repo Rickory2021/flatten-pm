@@ -136,7 +136,9 @@ stories:
         As a developer, the app has a persistent database that survives restarts,
         so that pipeline data is not lost between sessions.
       stage: s1
-      status: backlog
+      status: in-progress
+      # [DEFERRED] upgrade rule: needs real builtin content
+      # [DEFERRED] active binding guard: needs repo/binding CRUD
       acceptance_criteria:
         - "Single SQLite DB file in app data directory; path overridable via --db for tests and --data-dir for the whole app data tree"
         - "WAL mode enabled at connection time; busy_timeout configured (e.g. 5000ms)"
@@ -176,7 +178,10 @@ stories:
         codes, and JSON output, so that every later story can be verified from
         a shell.
       stage: s1
-      status: backlog
+      status: in-progress
+      # [DEFERRED] fixtures convention
+      # [DEFERRED] SIGINT handling
+      # [DEFERRED] settings value validation
       acceptance_criteria:
         - "Subcommand groups reserved: db, repo, recipe, transform, template, binding, export, watch, flag, history, settings"
         - "--data-dir <path> overrides the app data directory for tries, export folders, database, PID file"
