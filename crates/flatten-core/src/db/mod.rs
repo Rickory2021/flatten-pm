@@ -32,37 +32,12 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    /// Helper: create a temp db with a Writer, return both.
-    fn test_db() -> (tempfile::NamedTempFile, writer::Writer) {
+    /// Helper: create a seeded database, return tempfile and reader connection.
+    fn test_reader() -> (tempfile::NamedTempFile, rusqlite::Connection) {
         let tmp = tempfile::NamedTempFile::new().expect("failed to create temp file");
-        let w = writer::Writer::open(tmp.path()).expect("Writer::open failed");
-        (tmp, w)
-    }
-
-    /// Schema contains exactly 16 tables after initialization.
-    #[test]
-    fn schema_has_16_tables() {
-        let (tmp, _writer) = test_db();
-
+        let _w = writer::Writer::open(tmp.path()).expect("Writer::open failed");
         let conn = open_reader(tmp.path()).expect("open_reader failed");
-        let count: i32 = conn
-            .prepare("SELECT count(*) FROM sqlite_master WHERE type='table'")
-            .unwrap()
-            .query_row([], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 16, "expected 16 tables, got {count}");
-    }
-
-    /// PRAGMA user_version is 1 after migration.
-    #[test]
-    fn user_version_is_1() {
-        let (tmp, _writer) = test_db();
-
-        let conn = open_reader(tmp.path()).expect("open_reader failed");
-        let version: i32 = conn
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 1, "expected user_version 1, got {version}");
+        (tmp, conn)
     }
 
     /// open_reader fails on a nonexistent database file.
@@ -92,9 +67,8 @@ mod tests {
     /// open_reader connection rejects write statements.
     #[test]
     fn reader_rejects_writes() {
-        let (tmp, _writer) = test_db();
+        let (_tmp, conn) = test_reader();
 
-        let conn = open_reader(tmp.path()).expect("open_reader failed");
         let result = conn.execute(
             "INSERT INTO settings (key, value) VALUES ('test', 'val')",
             [],

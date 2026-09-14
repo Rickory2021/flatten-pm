@@ -191,10 +191,50 @@ CREATE TABLE IF NOT EXISTS change_counter (
     counter INTEGER NOT NULL DEFAULT 0
 );"#,)
     .foreign_key_check(),
-    // v2 example:
-    // M::up("ALTER TABLE repos ADD COLUMN new_col TEXT;")
-    //     .down("ALTER TABLE repos DROP COLUMN new_col;")
-    //     .foreign_key_check(),
+    M::up(r#"
+-- v2: builtin protection triggers
+-- Prevents hard-delete and soft-delete of curation='builtin' rows.
+ 
+CREATE TRIGGER IF NOT EXISTS guard_builtin_transforms_delete
+BEFORE DELETE ON transforms
+WHEN OLD.curation = 'builtin'
+BEGIN SELECT RAISE(ABORT, 'cannot delete builtin transform'); END;
+ 
+CREATE TRIGGER IF NOT EXISTS guard_builtin_transforms_softdelete
+BEFORE UPDATE OF deleted_at ON transforms
+WHEN OLD.curation = 'builtin' AND NEW.deleted_at IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'cannot soft-delete builtin transform'); END;
+ 
+CREATE TRIGGER IF NOT EXISTS guard_builtin_templates_delete
+BEFORE DELETE ON templates
+WHEN OLD.curation = 'builtin'
+BEGIN SELECT RAISE(ABORT, 'cannot delete builtin template'); END;
+ 
+CREATE TRIGGER IF NOT EXISTS guard_builtin_templates_softdelete
+BEFORE UPDATE OF deleted_at ON templates
+WHEN OLD.curation = 'builtin' AND NEW.deleted_at IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'cannot soft-delete builtin template'); END;
+ 
+CREATE TRIGGER IF NOT EXISTS guard_builtin_recipes_delete
+BEFORE DELETE ON build_recipes
+WHEN OLD.curation = 'builtin'
+BEGIN SELECT RAISE(ABORT, 'cannot delete builtin recipe'); END;
+ 
+CREATE TRIGGER IF NOT EXISTS guard_builtin_recipes_softdelete
+BEFORE UPDATE OF deleted_at ON build_recipes
+WHEN OLD.curation = 'builtin' AND NEW.deleted_at IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'cannot soft-delete builtin recipe'); END;
+"#)
+    .down(r#"
+DROP TRIGGER IF EXISTS guard_builtin_transforms_delete;
+DROP TRIGGER IF EXISTS guard_builtin_transforms_softdelete;
+DROP TRIGGER IF EXISTS guard_builtin_templates_delete;
+DROP TRIGGER IF EXISTS guard_builtin_templates_softdelete;
+DROP TRIGGER IF EXISTS guard_builtin_recipes_delete;
+DROP TRIGGER IF EXISTS guard_builtin_recipes_softdelete;
+"#),
+
+    // Future v3+ goes here
 ];
 pub(crate) const MIGRATIONS: Migrations<'_> = Migrations::from_slice(MIGRATIONS_SLICE);
 
@@ -202,9 +242,9 @@ pub(crate) const MIGRATIONS: Migrations<'_> = Migrations::from_slice(MIGRATIONS_
 mod tests {
     use super::*;
 
-    ///MIGRATIONS SQL parses without error.
+    /// MIGRATIONS SQL parses without error.
     #[test]
     fn validates() {
-        MIGRATIONS.validate().expect("migration validation failed")
+        MIGRATIONS.validate().expect("migration validation failed");
     }
 }

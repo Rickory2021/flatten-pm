@@ -311,4 +311,72 @@ mod tests {
             .unwrap();
         assert_eq!(count, 16, "schema should still have 16 tables after re-open");
     }
+
+    /// Builtin transforms cannot be hard-deleted.
+    #[test]
+    fn builtin_transform_rejects_delete() {
+        let (_tmp, writer) = test_writer();
+ 
+        let result = writer.call_write(|conn| {
+            conn.execute(
+                "DELETE FROM transforms WHERE name = 'flatten'",
+                [],
+            ).map_err(error::Error::from)?;
+            Ok(())
+        });
+ 
+        assert!(result.is_err(), "should reject delete of builtin transform");
+    }
+ 
+    /// Builtin transforms cannot be soft-deleted.
+    #[test]
+    fn builtin_transform_rejects_soft_delete() {
+        let (_tmp, writer) = test_writer();
+ 
+        let result = writer.call_write(|conn| {
+            conn.execute(
+                "UPDATE transforms SET deleted_at = '2025-01-01T00:00:00Z' WHERE name = 'flatten'",
+                [],
+            ).map_err(error::Error::from)?;
+            Ok(())
+        });
+ 
+        assert!(result.is_err(), "should reject soft-delete of builtin transform");
+    }
+ 
+    /// Builtin recipes cannot be hard-deleted.
+    #[test]
+    fn builtin_recipe_rejects_delete() {
+        let (_tmp, writer) = test_writer();
+ 
+        let result = writer.call_write(|conn| {
+            conn.execute(
+                "DELETE FROM build_recipes WHERE name = 'shipped-default'",
+                [],
+            ).map_err(error::Error::from)?;
+            Ok(())
+        });
+ 
+        assert!(result.is_err(), "should reject delete of builtin recipe");
+    }
+ 
+    /// Custom rows are not affected by builtin protection triggers.
+    #[test]
+    fn custom_transform_allows_delete() {
+        let (_tmp, writer) = test_writer();
+ 
+        writer.call_write(|conn| {
+            conn.execute(
+                "INSERT INTO transforms (name, scope, curation) VALUES ('test-custom', 'file', 'custom')",
+                [],
+            ).map_err(error::Error::from)?;
+ 
+            conn.execute(
+                "DELETE FROM transforms WHERE name = 'test-custom'",
+                [],
+            ).map_err(error::Error::from)?;
+ 
+            Ok(())
+        }).expect("custom transform delete should succeed");
+    }
 }
