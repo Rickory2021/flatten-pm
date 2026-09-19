@@ -1,52 +1,31 @@
 // src/App.tsx
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { MemoryRouter, Routes, Route, Navigate } from "react-router";
+import { Layout } from "@/components/layout/Layout";
+import { ReposPage } from "@/pages/ReposPage";
+import { RecipesPage } from "@/pages/RecipesPage";
+import { TransformsPage } from "@/pages/TransformsPage";
+import { TemplatesPage } from "@/pages/TemplatesPage";
+import { BindingsPage } from "@/pages/BindingsPage";
+import { WatchPage } from "@/pages/WatchPage";
+import { SettingsPage } from "@/pages/SettingsPage";
+import { DevToolsPage } from "@/pages/DevToolsPage";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
-
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
-
+export default function App() {
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    <MemoryRouter initialEntries={["/repos"]}>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route index element={<Navigate to="/repos" replace />} />
+          <Route path="repos" element={<ReposPage />} />
+          <Route path="recipes" element={<RecipesPage />} />
+          <Route path="transforms" element={<TransformsPage />} />
+          <Route path="templates" element={<TemplatesPage />} />
+          <Route path="bindings" element={<BindingsPage />} />
+          <Route path="watch" element={<WatchPage />} />
+          <Route path="settings" element={<SettingsPage />} />
+          <Route path="dev-tools" element={<DevToolsPage />} />
+        </Route>
+      </Routes>
+    </MemoryRouter>
   );
 }
-
-export default App;
