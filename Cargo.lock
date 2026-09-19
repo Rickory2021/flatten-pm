@@ -1280,7 +1280,9 @@ dependencies = [
 name = "flatten-pm"
 version = "0.1.0"
 dependencies = [
+ "dirs 7.0.0",
  "flatten-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",
