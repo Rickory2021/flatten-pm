@@ -505,6 +505,55 @@ impl Trie {
             .unwrap_or(false)
     }
 
+    /// All leaf paths under the given directory prefix, sorted by byte order
+    /// of the full `/`-joined path. Subtree walk, then `sort_unstable`.
+    ///
+    /// Empty prefix returns all leaves. Prefix naming a leaf returns that one
+    /// path. Invalid prefix returns empty `Vec`.
+    pub fn list(&self, prefix: &str) -> Vec<String> {
+        let (start_idx, path_prefix) = if prefix.is_empty() {
+            (ROOT, String::new())
+        } else {
+            if validate_path(prefix).is_err() {
+                return Vec::new();
+            }
+            match self.resolve_path(prefix) {
+                Some(idx) => (idx, prefix.to_string()),
+                None => return Vec::new(),
+            }
+        };
+
+        // If start is a leaf, return just that path
+        if matches!(&self.arena[start_idx.0 as usize], NodeKind::Leaf { .. }) {
+            return vec![path_prefix];
+        }
+
+        let mut result = Vec::new();
+        self.collect_leaves(start_idx, &path_prefix, &mut result);
+        result.sort_unstable();
+        result
+    }
+
+    /// Recursively collect leaf paths from a subtree.
+    fn collect_leaves(&self, idx: NodeIndex, prefix: &str, result: &mut Vec<String>) {
+        match &self.arena[idx.0 as usize] {
+            NodeKind::Dir { children, .. } => {
+                for (name, child_idx) in children {
+                    let child_path = if prefix.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{prefix}/{name}")
+                    };
+                    self.collect_leaves(*child_idx, &child_path, result);
+                }
+            }
+            NodeKind::Leaf { .. } => {
+                result.push(prefix.to_string());
+            }
+            NodeKind::Free { .. } => {} // Defensive; never reached in valid tree
+        }
+    }
+
     /// Number of arena slots (including free). Test-only.
     #[cfg(test)]
     fn arena_len(&self) -> usize {
@@ -1124,6 +1173,68 @@ mod tests {
         assert!(
             matches!(result, Err(Error::InvalidPath(_))),
             ".. component should return InvalidPath"
+        );
+    }
+
+    // --- Concurrency ---
+
+    // --- List ---
+
+    #[test]
+    fn list_prefix_sorted() {
+        let mut trie = Trie::new();
+        // "a-b" and "a/c" distinguish byte-order sort from traversal order:
+        // traversal visits child "a" (→ src/a/c) before "a-b" (→ src/a-b),
+        // but byte order has '-' (0x2D) < '/' (0x2F), so src/a-b < src/a/c.
+        trie.insert("src/a-b", leaf([1u8; 32])).unwrap();
+        trie.insert("src/a/c", leaf([2u8; 32])).unwrap();
+
+        let paths = trie.list("src");
+        assert_eq!(
+            paths,
+            vec!["src/a-b", "src/a/c"],
+            "list should sort by byte order of full path, not traversal order"
+        );
+    }
+
+    #[test]
+    fn list_empty_prefix_returns_all() {
+        let mut trie = Trie::new();
+        trie.insert("b", leaf([1u8; 32])).unwrap();
+        trie.insert("a/x", leaf([2u8; 32])).unwrap();
+        trie.insert("a/y", leaf([3u8; 32])).unwrap();
+
+        let paths = trie.list("");
+        assert_eq!(
+            paths,
+            vec!["a/x", "a/y", "b"],
+            "empty prefix should return all leaves, sorted"
+        );
+    }
+
+    #[test]
+    fn list_prefix_is_leaf() {
+        let mut trie = Trie::new();
+        trie.insert("single-file", leaf([1u8; 32])).unwrap();
+        trie.insert("other", leaf([2u8; 32])).unwrap();
+
+        let paths = trie.list("single-file");
+        assert_eq!(
+            paths,
+            vec!["single-file"],
+            "list on a leaf should return that one path"
+        );
+    }
+
+    #[test]
+    fn list_invalid_prefix_returns_empty() {
+        let mut trie = Trie::new();
+        trie.insert("a", leaf([1u8; 32])).unwrap();
+
+        let paths = trie.list("a/../b");
+        assert!(
+            paths.is_empty(),
+            "list with invalid prefix should return empty Vec"
         );
     }
 
