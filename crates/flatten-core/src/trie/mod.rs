@@ -303,12 +303,12 @@ impl Trie {
 
     // --- Public mutation ---
 
-    /// Insert or replace a leaf. Intermediate directories created as needed.
+    /// Insert a leaf without recomputing Merkle hashes. Returns the ancestor
+    /// indices so the caller can recompute selectively.
     ///
-    /// If the path currently names a directory, it is replaced (leaf wins);
-    /// the old subtree is freed. If a prefix of the path is currently a leaf,
-    /// it becomes a directory. Eagerly recomputes ancestor Merkle hashes.
-    pub fn insert(&mut self, path: &str, leaf: LeafNode) -> Result<()> {
+    /// Used by `insert` (recomputes the returned ancestors) and `from_leaves`
+    /// (skips per-insert recompute, does one post-order pass at the end).
+    fn insert_unhashed(&mut self, path: &str, leaf: LeafNode) -> Result<Vec<NodeIndex>> {
         validate_path(path)?;
 
         let segments: Vec<&str> = path.split('/').collect();
@@ -374,11 +374,53 @@ impl Trie {
             }
         }
 
-        // Recompute Merkle hashes bottom-up
+        Ok(ancestors)
+    }
+
+    /// Recursively recompute Merkle hashes for a subtree, post-order.
+    /// Children are recomputed before their parent, so each directory sees
+    /// up-to-date child hashes. O(N) in subtree size.
+    fn recompute_subtree(&mut self, idx: NodeIndex) {
+        let child_indices: Vec<NodeIndex> = match &self.arena[idx.0 as usize] {
+            NodeKind::Dir { children, .. } => children.iter().map(|(_, ci)| *ci).collect(),
+            _ => return,
+        };
+        for ci in child_indices {
+            self.recompute_subtree(ci);
+        }
+        self.recompute_merkle(idx);
+    }
+
+    // --- Public construction ---
+
+    /// Bulk-build a trie from an iterator of `(path, leaf)` pairs.
+    ///
+    /// Inserts all leaves without per-insert Merkle recomputation, then does
+    /// one post-order pass over the entire tree. O(N) total hashing instead
+    /// of O(N x depth). Duplicate paths: last wins.
+    pub fn from_leaves(
+        leaves: impl IntoIterator<Item = (String, LeafNode)>,
+    ) -> Result<Trie> {
+        let mut trie = Trie::new();
+        for (path, leaf) in leaves {
+            trie.insert_unhashed(&path, leaf)?;
+        }
+        trie.recompute_subtree(ROOT);
+        Ok(trie)
+    }
+
+    // --- Public mutation ---
+
+    /// Insert or replace a leaf. Intermediate directories created as needed.
+    ///
+    /// If the path currently names a directory, it is replaced (leaf wins);
+    /// the old subtree is freed. If a prefix of the path is currently a leaf,
+    /// it becomes a directory. Eagerly recomputes ancestor Merkle hashes.
+    pub fn insert(&mut self, path: &str, leaf: LeafNode) -> Result<()> {
+        let ancestors = self.insert_unhashed(path, leaf)?;
         for &idx in ancestors.iter().rev() {
             self.recompute_merkle(idx);
         }
-
         Ok(())
     }
 
@@ -1177,6 +1219,60 @@ mod tests {
     }
 
     // --- Concurrency ---
+
+    // --- Bulk construction ---
+
+    #[test]
+    fn from_leaves_bulk() {
+        // Build via from_leaves and via sequential insert, compare root hashes.
+        let entries: Vec<(String, LeafNode)> = vec![
+            ("a/x".into(), leaf([1u8; 32])),
+            ("b".into(), leaf([2u8; 32])),
+            ("a/y".into(), leaf([3u8; 32])),
+        ];
+
+        let bulk = Trie::from_leaves(entries.clone()).expect("from_leaves should succeed");
+
+        let mut sequential = Trie::new();
+        for (path, l) in &entries {
+            sequential.insert(path, l.clone()).unwrap();
+        }
+
+        assert_eq!(
+            bulk.root_hash(),
+            sequential.root_hash(),
+            "from_leaves root_hash should match sequential inserts"
+        );
+    }
+
+    #[test]
+    fn from_leaves_duplicate_last_wins() {
+        let entries: Vec<(String, LeafNode)> = vec![
+            ("f".into(), leaf([1u8; 32])),
+            ("f".into(), leaf([2u8; 32])),
+        ];
+
+        let trie = Trie::from_leaves(entries).expect("from_leaves should succeed");
+        assert_eq!(
+            trie.leaf_hash("f"),
+            Some([2u8; 32]),
+            "duplicate paths: last value should win"
+        );
+    }
+
+    #[test]
+    fn from_leaves_invalid_path() {
+        let entries: Vec<(String, LeafNode)> = vec![
+            ("good".into(), leaf([1u8; 32])),
+            ("../bad".into(), leaf([2u8; 32])),
+        ];
+
+        let result = Trie::from_leaves(entries);
+        assert!(
+            matches!(result, Err(Error::InvalidPath(_))),
+            "from_leaves with invalid path should return InvalidPath"
+        );
+    }
 
     // --- List ---
 
