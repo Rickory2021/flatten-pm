@@ -40,7 +40,7 @@ A registered source directory.
 | `id` | int | PK |
 | `path` | text | Absolute path to the source directory. |
 | `name` | text | Unique. What `SOURCE` instructions reference. |
-| `ingest_patterns` | json | Gitignore-style pattern list. Seeded from `.gitignore` import or default (`.git/` only). Editable in GUI. |
+| `ingest_patterns` | json | Gitignore-style pattern list. Seeded from `.gitignore` import or default (empty list; `.git` excluded unconditionally at walk time). Editable in GUI. |
 | `line_ending_policy` | text | `preserve` (default) or `lf`. Applied by watch at placement. |
 | `safety_allowlist` | json, nullable | s2. Rule IDs and paths to skip during export safety scan. |
 | `trie_updated_at` | datetime, nullable | When the trie file was last persisted. |
@@ -65,7 +65,7 @@ flowchart TD
     init -->|register| insert["Insert repos row (path, name, ingest_patterns, line_ending_policy)"]
     insert --> import{"Import from .gitignore?<br/>(one-time, GUI offers at registration)"}
     import -->|yes| read_gi["Read .gitignore files,<br/>compile into flat pattern list,<br/>store in ingest_patterns"]
-    import -->|no| default["Default exclude list:<br/>.git/ directory only"]
+    import -->|no| default["Default: empty list<br/>.git excluded at walk time"]
     read_gi --> assemble
     default --> assemble
     init -->|re-ingest| assemble
@@ -232,7 +232,10 @@ columns on the `repos` row.
 1. At registration, the GUI offers to import from `.gitignore` files in the
    source (one-time read, not a live dependency).
 2. Import compiles `.gitignore` patterns into a flat list and stores it.
-3. Without import, the default exclude list contains `.git/` only.
+   Patterns from subdirectory `.gitignore` files are prefixed with the
+   subdirectory path; unanchored patterns get `**/` so they match at any
+   depth under that subdirectory, as git does.
+3. Without import, the stored default is an empty list; `.git` is excluded unconditionally at walk time (matches both the directory and the gitdir worktree file).
 4. The user edits the list in the GUI. The stored list is the source of truth.
 5. s2: a "diff against current .gitignore" action shows drift; a "re-import"
    merges new patterns.
@@ -243,7 +246,7 @@ columns on the `repos` row.
 |---|---|
 | Syntax | Gitignore-style globs via the `ignore` crate (`*`, `**`, `?`, `directory/`, `!negation`) |
 | Negation | `!` re-includes previously excluded files. A file under an excluded directory cannot be re-included. |
-| Empty list | No filtering (ingest everything except `.git/`). |
+| Empty list | No filtering (ingest everything except `.git`). |
 | Directory match | Cut during the walk: excluded directories are never descended. |
 | File match | Skipped: not added to the trie. |
 
@@ -254,6 +257,8 @@ columns on the `repos` row.
 | Tracked-but-matching files are excluded | Ingest does not read the git index. |
 | Global excludes (`core.excludesFile`, `.git/info/exclude`) not read | Not a git tool; the stored list is the config. |
 | `.gitignore` is an import source, not a live dependency | Config ejection: seed once, user owns it. |
+| Case-sensitive matching on all platforms | Git sets `core.ignorecase=true` on case-insensitive filesystems; we match case-sensitively. See PLAT-001. |
+| Unreadable directory aborts the ingest | Git warns and continues; we return `Io` error. Deliberate: partial ingests risk silent data loss. |
 
 **Symlinks:** not followed. The link itself is an ordinary leaf whose content
 is the link target string (hashed as bytes). During `COPY` in export, symlink

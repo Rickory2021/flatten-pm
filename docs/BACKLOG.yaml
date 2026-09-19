@@ -7,7 +7,8 @@
 # Stage values: s1 (core engine + CLI) | s2 (desktop UI + product features) | s3 (v2+)
 #
 # done-deferred: all non-deferred ACs met, verified, tests passing.
-# Tagged [DEFERRED] items are blocked on a named downstream story.
+# Tagged items below status: line summarize what's blocked and what
+# was learned. See "Inline status tags" section for the tag format.
 # When the blocker ships, deferred items are picked up and the story
 # advances to done. A story at done-deferred is not actively worked;
 # it is complete for now.
@@ -84,6 +85,41 @@
 #      are surfaced as findings, not silently fixed.
 #    - YAGNI: code only what the story requires.
 #      Premature abstractions and "while we're here" expansions are out of scope.
+
+# --- Inline status tags -------------------------------------------------------------------
+#
+# Comments below a story's `status:` line form the at-a-glance index
+# of what is blocked and what was learned. One line per item.
+# Position: immediately below `status:`, before `acceptance_criteria:`.
+#
+# Tag format:
+#
+#   # [DEFERRED: STORY-ID] short description
+#     Summarizes what's blocked and on what story. These are an index;
+#     the AC or verification line carrying the same tag is the detail.
+#     When the deferral is a code-level gap with no AC of its own,
+#     the detail is a [DEFERRED: X] doc comment in source.
+#
+#   # [RESOLVED: STORY-ID] short description
+#     Was deferred, now resolved by that story. Stays for traceability.
+#
+#   # [FINDING] short description
+#     Implementation finding discovered during build or audit.
+#     Not a blocker; recorded for future stories or reconciliation.
+#
+# Inline on AC / verification lines (the detail the index points to):
+#
+#   [DEFERRED: X] or [DEFERRED: X, extra notes]
+#     This AC or verification is blocked on story X.
+#
+#   [RESOLVED: X]
+#     Was deferred on X, now done.
+#
+#   [resolved by X; remaining notes]
+#     Partially resolved; notes say what's left.
+#
+# Grep: `grep "DEFERRED:" docs/BACKLOG.yaml` lists every open item
+# across all stories.
 
 # --- Epics -------------------------------------------------------------------------------
 
@@ -204,8 +240,8 @@ stories:
         so that pipeline data is not lost between sessions.
       stage: s1
       status: done-deferred
-      # [DEFERRED] upgrade rule: needs real builtin content (EX-006)
-      # [DEFERRED] active binding guard: needs repo/binding CRUD (DA-005)
+      # [DEFERRED: EX-006] upgrade rule: needs real builtin content
+      # [DEFERRED: DA-005] active binding guard: needs repo/binding CRUD
       acceptance_criteria:
         - "Single SQLite DB file in app data directory; path overridable via --db for tests and --data-dir for the whole app data tree"
         - "WAL mode enabled at connection time; busy_timeout configured (e.g. 5000ms)"
@@ -220,9 +256,9 @@ stories:
         - "Indexes: file_history (repo_id, file_path, created_at)"
         - "Seed: builtin transforms (flatten, pack, enrichment-injection, enrichment-trim, context-manifest) with scope (file or directory), curation=builtin, and enrichment-trim.reverses=enrichment-injection; builtin templates (default with kind=enrichment, context-manifest with kind=file) with curation=builtin; seeding runs no JS"
         - "Seed: shipped generic recipe (name shipped-default; see 3_RECIPES.md shipped recipe) as build_recipes with curation=builtin and version 1"
-        - "Upgrade rule: on startup, compare embedded shipped content against ALL existing version rows for each builtin entity (not just the current version); if no row matches, insert a new version; never move the pointer; user adopts via restore-from-shipped; CLI ls commands show '(update available)' next to entities with a newer unpointed shipped version"
+        - "Upgrade rule: on startup, compare embedded shipped content against ALL existing version rows for each builtin entity (not just the current version); if no row matches, insert a new version; never move the pointer; user adopts via restore-from-shipped; CLI ls commands show '(update available)' next to entities with a newer unpointed shipped version [DEFERRED: EX-006]"
         - "Trigger or app rule prevents soft-delete and hard-delete of curation=builtin rows"
-        - "Active binding guard: soft-deleting a repo or recipe that has active bindings is a domain error naming the bindings"
+        - "Active binding guard: soft-deleting a repo or recipe that has active bindings is a domain error naming the bindings [DEFERRED: DA-005]"
         - "Settings seeded with defaults per the Settings contract: watch_source_dir (unset), watch_poll_interval_ms (30000), watch_settle_ms (500), watch_debounce_ms (250), trie_refresh_interval_ms (30000), transform_timeout_ms (10000), transform_memory_mb (256), copy_size_limit_mb (64), binary_extensions (seeded list)"
         - "change_counter table: single row (id=1), monotonic counter; bumped in the same transaction as every export success, binding activate/deactivate/delete, and entity pointer move"
         - "No Tauri dependencies (callable from flatten-core)"
@@ -231,7 +267,7 @@ stories:
         - "flatten db tables --db /tmp/t.db --json lists exactly the 16 tables"
         - "flatten db query 'select name, scope, curation, reverses from transforms' --db /tmp/t.db shows the five builtins with enrichment-trim reversing enrichment-injection; 'select name, kind, curation from templates' shows default (enrichment, builtin) and context-manifest (file, builtin); 'select name from build_recipes' shows shipped-default"
         - "Deleting a builtin row is rejected by the app rule (cargo test exercises this directly)"
-        - "Soft-deleting a repo with an active binding returns a domain error naming the binding (cargo test)"
+        - "Soft-deleting a repo with an active binding returns a domain error naming the binding (cargo test) [DEFERRED: DA-005]"
         - "Two flatten db init processes started concurrently both exit 0 and the schema is intact"
         - "cargo test -p flatten-core db:: covers migration idempotency, the upgrade rule, and two transactions submitted concurrently to the writer channel committing without interleaving"
       notes: >
@@ -246,9 +282,9 @@ stories:
         a shell.
       stage: s1
       status: done-deferred
-      # [DEFERRED] fixtures convention: needs first story with fixtures (DA-002/IN-001)
-      # [DEFERRED] SIGINT handling: needs watch session (WA-001)
-      # [DEFERRED] settings value validation: needs typed settings contract
+      # [RESOLVED: IN-001] fixtures convention: fixtures/README.md documents it
+      # [DEFERRED: WA-001] SIGINT handling: needs watch session
+      # [DEFERRED: unassigned] settings value validation: needs typed settings contract (F-phase3-03 moves to flatten-core)
       acceptance_criteria:
         - "Subcommand groups reserved: db, repo, recipe, transform, template, binding, export, watch, flag, history, settings"
         - "--data-dir <path> overrides the app data directory for tries, export folders, database, PID file"
@@ -258,12 +294,12 @@ stories:
         - "Errors printed to stderr as one line; --json wraps them as {\"error\": ..., \"kind\": \"...\", ...} per the error model (domain, usage, io, transform, database)"
         - "fixtures/ directory convention: fixtures/<n>/ for repos, fixtures/recipes/*.recipe, fixtures/transforms/*.js, fixtures/downloads/ for watch inputs"
         - "db init, db tables, and db query <sql> (read-only, write statements rejected) implemented here"
-        - "settings get <key> and settings set <key> <value> implemented here; unknown keys exit 1; values validated per key"
-        - "Long-running subcommands (watch) stop cleanly on SIGINT/Ctrl+C: in-flight placement finishes, never half-written; exit 0"
+        - "settings get <key> and settings set <key> <value> implemented here; unknown keys exit 1; values validated per key [DEFERRED: unassigned, validation not implemented in CLI]"
+        - "Long-running subcommands (watch) stop cleanly on SIGINT/Ctrl+C: in-flight placement finishes, never half-written; exit 0 [DEFERRED: WA-001]"
       verification:
         - "flatten --help lists the eleven groups; flatten nope exits 2"
         - "flatten db init --db /tmp/t.db --json prints {\"ok\": true, \"user_version\": N}"
-        - "flatten settings set watch_source_dir /nonexistent exits 1 with a path error"
+        - "flatten settings set watch_source_dir /nonexistent exits 1 with a path error [DEFERRED: unassigned, cmd_settings_set has no validation]"
       notes: >
         F-52: session restart (--since last) is a v2 concern. F-53: logging
         contract (tracing, NDJSON event stream) to be settled during
@@ -276,16 +312,16 @@ stories:
         detection works immediately without a full re-ingest.
       stage: s1
       status: done-deferred
-      # [DEFERRED: IN-001] repos.trie_updated_at written on every persist
-      # [DEFERRED: IN-001] persist is debounced (dirty flag, quiescence, shutdown)
-      # [DEFERRED: IN-001] missing/corrupt file triggers full re-ingest + warning
-      # [DEFERRED: IN-001] refresh builds new trie off-lock, swaps Arc
-      # [DEFERRED: IN-001] refresh reports whether root_hash changed
-      # [DEFERRED: IN-001] full re-hash: stat + hash every file
-      # [DEFERRED: IN-001] stat-based refresh: compare (size, mtime), re-hash changed
+      # [RESOLVED: IN-001] repos.trie_updated_at written on every persist
+      # [DEFERRED: WA-001] persist is debounced (dirty flag, quiescence, shutdown)
+      # [RESOLVED: IN-001] missing/corrupt file triggers full re-ingest + warning
+      # [DEFERRED: WA-001] refresh builds new trie off-lock, swaps Arc
+      # [DEFERRED: WA-001] refresh reports whether root_hash changed
+      # [RESOLVED: IN-001] full re-hash: stat + hash every file
+      # [DEFERRED: WA-001] stat-based refresh: compare (size, mtime), re-hash changed
       # [DEFERRED: WA-001] copy-on-write: Arc::make_mut, re-hash placed file, swap Arc
-      # [DEFERRED: IN-001] verification: flatten repo add / flatten repo ls CLI commands
-      # [DEFERRED: IN-001] verification: truncate trie file, flatten repo ls recovers
+      # [RESOLVED: IN-001] verification: flatten repo add / flatten repo ls CLI commands
+      # [RESOLVED: IN-001] verification: truncate trie file, flatten repo tree recovers
       acceptance_criteria:
         - "Trie API: insert(path, LeafNode), remove(path), get(path), has(path), list(prefix) sorted by path, leaf_hash(path), subtree_hash(dir), root_hash(), stat_matches(path, size, mtime), from_leaves(iter)"
         - "Leaf: (path, content_hash, size, mtime); size and mtime are cache metadata for stat-based refresh, not hashed into the Merkle tree"
@@ -295,18 +331,18 @@ stories:
         - "Arena storage: Vec<Node> with index-based references behind Arc<Trie>"
         - "Serialized to MessagePack via rmp-serde at tries/{repo_id}.trie"
         - "Atomic writes via tempfile + fsync + rename in the same directory"
-        - "Persist is debounced (dirty flag; written after quiescence and on shutdown), not per mutation [DEFERRED: IN-001]"
-        - "repos.trie_updated_at written on every persist [DEFERRED: IN-001]"
-        - "Missing or corrupt file triggers full re-ingest and a warning; never a crash [DEFERRED: IN-001, trie returns NotFound/Corrupt/UnsupportedFormat errors]"
-        - "Refresh builds a new trie off-lock and swaps the Arc; readers never observe a partial trie; callers holding a clone of the old Arc keep it for their operation [DEFERRED: IN-001]"
-        - "Refresh reports whether root_hash changed [DEFERRED: IN-001]"
-        - "Full re-hash: stat + hash every file; runs at session start, on repo reingest --full, and when trie file is missing or corrupt [DEFERRED: IN-001]"
-        - "Stat-based refresh: compare each file's current (size, mtime) against the leaf; re-hash only changed or new files; remove leaves for deleted files; recompute Merkle for affected subtrees; runs on the 30s timer [DEFERRED: IN-001]"
+        - "Persist is debounced (dirty flag; written after quiescence and on shutdown), not per mutation [DEFERRED: WA-001]"
+        - "repos.trie_updated_at written on every persist"
+        - "Missing or corrupt file triggers full re-ingest and a warning; never a crash"
+        - "Refresh builds a new trie off-lock and swaps the Arc; readers never observe a partial trie; callers holding a clone of the old Arc keep it for their operation [DEFERRED: WA-001]"
+        - "Refresh reports whether root_hash changed [DEFERRED: WA-001]"
+        - "Full re-hash: stat + hash every file; runs at session start, on repo reingest --full, and when trie file is missing or corrupt [resolved by IN-001; --full flag and session-start trigger deferred to WA-001]"
+        - "Stat-based refresh: compare each file's current (size, mtime) against the leaf; re-hash only changed or new files; remove leaves for deleted files; recompute Merkle for affected subtrees; runs on the 30s timer [DEFERRED: WA-001]"
         - "Copy-on-write: watch placement uses Arc::make_mut, re-hashes the placed file, updates leaf and directory hashes, swaps the Arc [DEFERRED: WA-001, trie side proven by arc_clone test]"
       verification:
         - "cargo test -p flatten-core trie:: covers insert/remove, Merkle recompute, sorted list, lossy path conversion, case-sensitive keys, stat-based refresh (stat_matches tests), copy-on-write (arc_clone test), persistence roundtrip, structural validation"
-        - "flatten repo add fixtures/repo-a --name repo-a then flatten repo ls --json shows trie_updated_at set and tries/<id>.trie present [DEFERRED: IN-001]"
-        - "Truncate tries/<id>.trie, run flatten repo ls; log shows re-ingest, file regenerated, command exits 0 [DEFERRED: IN-001]"
+        - "flatten repo add fixtures/repo-a --name repo-a then flatten repo ls --json shows trie_updated_at set and tries/<id>.trie present"
+        - "Truncate tries/<id>.trie, run flatten repo tree repo-a; log shows re-ingest, file regenerated, command exits 0"
       notes: >
         F-43: arena and snapshot cadence are suggested implementation details,
         not hard contracts. The trie is an internal type; its in-memory shape
@@ -318,23 +354,30 @@ stories:
         As a developer, I can register a source and define gitignore-style
         exclude patterns for it, so that I control exactly what gets ingested.
       stage: s1
-      status: backlog
+      status: done-deferred
+      # [DEFERRED: DA-004] repo history, repo rollback, repo_versions row writes
+      # [DEFERRED: DA-005] soft_delete_repo active-binding guard
+      # [DEFERRED: EX-006] enrichment_count (extraction pattern matches in ingest report)
+      # [FINDING] .git (not .git/) is the walk-time invariant; design doc amended
+      # [FINDING] malformed-line skip via add_line is defensive; ignore crate accepts nearly everything git does
+      # [FINDING] CLI cannot clear patterns to [] (--clear-patterns flag or follow-up needed)
+      # [FINDING] soft-deleted repo names permanently unusable; partial unique index or repo purge needed
       acceptance_criteria:
         - "Register a source: insert repos row with path, name, ingest_patterns (gitignore-style list), line_ending_policy (default preserve); name is what SOURCE instructions reference"
-        - "Config ejection: at registration, optionally import from .gitignore files in the source (one-time read, not a live dependency); import compiles .gitignore patterns into a flat list and stores in ingest_patterns; without import, default is .git/ only"
+        - "Config ejection: at registration, optionally import from .gitignore files in the source (one-time read, not a live dependency); import compiles .gitignore patterns into a flat list and stores in ingest_patterns; without import, stored default is an empty list; .git is excluded unconditionally at walk time, not stored"
         - "Stored ingest_patterns is the SSOT after import; no live .gitignore dependency"
         - "Registration runs the initial ingest (full re-hash) and writes the trie file"
         - "Clear error on non-existent root path or duplicate name"
         - "Re-ingest is idempotent and exposed as a function export and watch call"
         - "Recursive walk from repos.path using the ignore crate for gitignore-style pattern matching"
         - "Gitignore syntax: *, **, ?, directory/, !negation; negation re-includes previously excluded files but a file under an excluded directory cannot be re-included"
-        - "Empty pattern list means no filtering (ingest everything except .git/)"
+        - "Empty pattern list means no filtering (ingest everything except .git)"
         - "Excluded directories cut during the walk (never descended)"
         - "Symlinks not followed; the link itself is an ordinary leaf whose content is the link target string"
-        - ".git/ directory excluded unconditionally"
+        - ".git excluded unconditionally (matches both the directory and gitdir worktree file)"
         - "Produces the ingest trie: one leaf per included file with its BLAKE3 content hash"
-        - "Ingest report: file count, files whose head matches a current extraction pattern (committed enrichments)"
-        - "flatten repo add, repo ls, repo tree, repo edit, repo reingest, repo history, repo rollback, repo rm call flatten-core functions; repo tree <name> --json prints the trie's paths"
+        - "Ingest report: file count, files whose head matches a current extraction pattern (committed enrichments) [resolved by IN-001; extraction pattern matches deferred to EX-006, enrichment_count always 0]"
+        - "flatten repo add, repo ls, repo tree, repo edit, repo reingest, repo history, repo rollback, repo rm call flatten-core functions; repo tree <name> --json prints the trie's paths [DEFERRED: DA-004, history and rollback are stubs that exit 2]"
       verification:
         - "flatten repo add fixtures/repo-a --name repo-a --pattern 'node_modules/' --pattern '*.log' exits 0; flatten repo tree repo-a --json lists no node_modules or .log paths"
         - "flatten repo add fixtures/repo-a --name repo-a-gi (with .gitignore import enabled); tree matches the set from .gitignore; flatten repo add fixtures/repo-a --name repo-a-raw (no import); tree includes the ignored files"
@@ -1131,6 +1174,7 @@ stories:
         - "Watch integration tests on all three"
         - "rquickjs builds and transform runtime passes on all three"
         - "Path handling: case-insensitive filesystems, NAME_MAX, reserved names, non-UTF-8"
+        - "Gitignore matching: git sets core.ignorecase=true on case-insensitive FS; our GitignoreBuilder defaults case-sensitive; match git behavior per platform"
         - "Tray, start-at-login, and notification verified per OS"
       verification:
         - "CI green on all three platforms"
