@@ -19,7 +19,9 @@ Flatten PM is not a greenfield build. The `scripts/flatten-sync/` directory cont
 
 The project is public and open source (MIT). No NDA constraints.
 
-For full product design, architecture, ADRs, and roadmap, see `docs/design/` (seven numbered files, 0 through 6). That directory is the authoritative reference for settled decisions. ADRs are in `docs/ADR.md` (54 records). Do not revisit ADRs without explicit instruction. Each ADR records the alternatives it rejected; read the relevant ADR before proposing a change that touches the recipe model, export state, flags, or transforms. Terms are defined in `docs/VOCABULARY.md`. Stories and build order are in `docs/BACKLOG.yaml`.
+For full product design, architecture, ADRs, and roadmap, see `docs/design/` (seven numbered files, 0 through 6). That directory is the authoritative reference for settled decisions. ADRs are in `docs/ADR.md` (54 records). Do not revisit ADRs without explicit instruction. Each ADR records the alternatives it rejected; read the relevant ADR before proposing a change that touches the recipe model, export state, flags, or transforms. Terms are defined in `docs/VOCABULARY.md`. Stories, build order, and the Definition of Done are in `docs/BACKLOG.yaml`.
+
+Story status lifecycle: `backlog` -> `in-progress` -> `done-deferred` -> `done`. A story at `done-deferred` has all non-deferred acceptance criteria met, verified, and tested; its remaining ACs are tagged `[DEFERRED]` with a named blocker story. When the blocker ships, deferred items are picked up and the story advances to `done`. The Definition of Done (eight criteria covering tests, error handling, CLI coverage, code quality, commit hygiene, and scope discipline) is documented in `docs/BACKLOG.yaml` and applies to every story.
 
 ## Repo structure
 
@@ -34,7 +36,7 @@ flatten-pm/
     design/                   # Seven numbered files (0_SUMMARY through 6_VERSIONING)
     ADR.md                    # Architecture decision records (54)
     VOCABULARY.md             # Term list with contract pointers
-    BACKLOG.yaml              # Stories and build order
+    BACKLOG.yaml              # Stories, build order, and Definition of Done
     lessons/                  # Rust learning notes
   scripts/                    # Tooling; includes flatten-sync prototype (Python, battle-tested across 7+ projects)
 ```
@@ -129,6 +131,7 @@ KISS, DRY, SSOT, SOLID, YAGNI, defensive programming. Flag violations rather tha
 
 - Active voice. "We built" not "was built."
 - No em dashes. Use commas, semicolons, or restructure.
+- ASCII only in prose, comments, and documentation. No unicode arrows, bullets, or ellipsis. Use `->` not `→`, `-` not `•`, `...` not `…`.
 - Concrete verbs over abstract nouns.
 - Plain language. "Use" not "utilize."
 - Serial (Oxford) comma.
@@ -158,7 +161,7 @@ Commit by logical checkpoint, not by session or file count.
 
 **Tauri integration:** `src-tauri/src/lib.rs`, `src-tauri/Cargo.toml` for command registration.
 
-**CLI work:** `crates/flatten-cli/src/main.rs`, `docs/design/1_INFRASTRUCTURE.md` (CLI subcommand table). Every s1 story's `verification` block in `docs/BACKLOG.yaml` names the command that proves it.
+**CLI work:** `src-cli/src/main.rs`, `docs/design/1_INFRASTRUCTURE.md` (CLI subcommand table). Every s1 story's `verification` block in `docs/BACKLOG.yaml` names the command that proves it.
 
 **Versioning and audit:** `docs/design/6_VERSIONING.md` (versioning model, shipped defaults, file history).
 
@@ -166,4 +169,4 @@ Commit by logical checkpoint, not by session or file count.
 
 ## On completion
 
-After adding, removing, or significantly changing any source file, verify the change compiles and passes existing tests before presenting it. State what you verified. If a change touches the backlog or design docs, note which stories or sections are affected so the developer can cross-check.
+Every story follows the Definition of Done in `docs/BACKLOG.yaml`. Before presenting work, verify the change compiles (`cargo clippy --workspace -- -D warnings`) and passes tests (`cargo test --workspace`). State what you verified. If a change touches the backlog or design docs, note which stories or sections are affected so the developer can cross-check.

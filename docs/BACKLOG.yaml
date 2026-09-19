@@ -3,8 +3,14 @@
 # Flatten PM project backlog.
 # Epics derived from docs/design/. Decision history in docs/ADR.md.
 #
-# Status values: backlog | in-progress | done
+# Status values: backlog | in-progress | done-deferred | done
 # Stage values: s1 (core engine + CLI) | s2 (desktop UI + product features) | s3 (v2+)
+#
+# done-deferred: all non-deferred ACs met, verified, tests passing.
+# Tagged [DEFERRED] items are blocked on a named downstream story.
+# When the blocker ships, deferred items are picked up and the story
+# advances to done. A story at done-deferred is not actively worked;
+# it is complete for now.
 #
 # Stories ordered by stage, then by build progression within each stage.
 # Top-to-bottom reading order is the roadmap: earlier stories provide the
@@ -17,6 +23,67 @@
 # Every s1 story ends with a `verification` block: the flatten CLI command or
 # cargo test target that proves the acceptance criteria against a named fixture
 # under fixtures/. A story is done when its verification passes.
+
+# --- Definition of Done -------------------------------------------------------------------
+#
+# Every story must satisfy all applicable criteria before status: done.
+#
+# 1. Acceptance criteria
+#    Every AC line in the story is met. No partial credit.
+#    Exception: an AC that cannot be met because its dependency hasn't
+#    landed yet (e.g. "active binding guard: needs repo/binding CRUD")
+#    is tagged [DEFERRED] with a comment naming the blocker story ID.
+#    The story moves to status: done-deferred (not done) until all
+#    deferred items are resolved. When the blocker ships, deferred
+#    items are picked up and the story advances to done.
+#    Non-deferred ACs still require full coverage (tests, CLI, etc.).
+#
+# 2. Verification commands
+#    Every command in the story's verification block passes.
+#    CLI commands exit 0 (or the documented error code).
+#    cargo test targets pass.
+#
+# 3. Unit tests (flatten-core)
+#    - Every public function has at least one happy-path test.
+#    - Every documented error path has a test that asserts the error.
+#      (FK violation, domain error, bad input, missing file, etc.)
+#    - Edge cases named in the story's AC or notes get their own test.
+#    - Tests live in #[cfg(test)] mod tests inside the owning module.
+#    - Test names are descriptive: what_condition_expected_result.
+#    - Every assert! and assert_eq! includes a failure message string.
+#
+# 4. CLI coverage (src-cli)
+#    - New subcommands wired in main.rs dispatch.
+#    - --json output works for every new subcommand.
+#    - Exit codes correct: 0 success, 1 domain error, 2 usage error.
+#    - Errors print to stderr, never stdout.
+#
+# 5. Error handling
+#    - No unwrap() or expect() in non-test code. Use ? with proper error types.
+#    - Errors use the module's thiserror enum (e.g. db::error::Error).
+#      New modules get their own Error enum + Result<T> alias.
+#    - Error variants carry enough context to diagnose
+#      (not just "failed", but "failed to open {path}: {source}").
+#
+# 6. Code quality
+#    - cargo clippy --workspace -- -D warnings passes (zero warnings).
+#    - cargo test --workspace passes (zero failures).
+#    - No TODO without a story ID or finding number (e.g. TODO(DA-003)).
+#    - Public functions and types have /// doc comments.
+#    - File-level // header comment explaining the module's purpose.
+#
+# 7. Commit hygiene
+#    - Staged per file (never git add . or git add <dir>/).
+#    - Message format: <type>(<scope>): <summary> (under 72 chars).
+#    - One logical checkpoint per commit, not one commit per session.
+#
+# 8. Scope discipline
+#    - No work outside the story's acceptance criteria unless it is
+#      additive/low-risk and noted in the commit message.
+#    - Behavioral or cascade-risk changes found during implementation
+#      are surfaced as findings, not silently fixed.
+#    - YAGNI: code only what the story requires.
+#      Premature abstractions and "while we're here" expansions are out of scope.
 
 # --- Epics -------------------------------------------------------------------------------
 
@@ -136,9 +203,9 @@ stories:
         As a developer, the app has a persistent database that survives restarts,
         so that pipeline data is not lost between sessions.
       stage: s1
-      status: in-progress
-      # [DEFERRED] upgrade rule: needs real builtin content
-      # [DEFERRED] active binding guard: needs repo/binding CRUD
+      status: done-deferred
+      # [DEFERRED] upgrade rule: needs real builtin content (EX-006)
+      # [DEFERRED] active binding guard: needs repo/binding CRUD (DA-005)
       acceptance_criteria:
         - "Single SQLite DB file in app data directory; path overridable via --db for tests and --data-dir for the whole app data tree"
         - "WAL mode enabled at connection time; busy_timeout configured (e.g. 5000ms)"
@@ -178,10 +245,10 @@ stories:
         codes, and JSON output, so that every later story can be verified from
         a shell.
       stage: s1
-      status: in-progress
-      # [DEFERRED] fixtures convention
-      # [DEFERRED] SIGINT handling
-      # [DEFERRED] settings value validation
+      status: done-deferred
+      # [DEFERRED] fixtures convention: needs first story with fixtures (DA-002/IN-001)
+      # [DEFERRED] SIGINT handling: needs watch session (WA-001)
+      # [DEFERRED] settings value validation: needs typed settings contract
       acceptance_criteria:
         - "Subcommand groups reserved: db, repo, recipe, transform, template, binding, export, watch, flag, history, settings"
         - "--data-dir <path> overrides the app data directory for tries, export folders, database, PID file"
@@ -189,7 +256,7 @@ stories:
         - "--json switches output to machine-readable JSON on stdout; human output otherwise"
         - "Exit codes: 0 success, 1 domain error (bad input, not found, IO, transform, database), 2 usage error"
         - "Errors printed to stderr as one line; --json wraps them as {\"error\": ..., \"kind\": \"...\", ...} per the error model (domain, usage, io, transform, database)"
-        - "fixtures/ directory convention: fixtures/<name>/ for repos, fixtures/recipes/*.recipe, fixtures/transforms/*.js, fixtures/downloads/ for watch inputs"
+        - "fixtures/ directory convention: fixtures/<n>/ for repos, fixtures/recipes/*.recipe, fixtures/transforms/*.js, fixtures/downloads/ for watch inputs"
         - "db init, db tables, and db query <sql> (read-only, write statements rejected) implemented here"
         - "settings get <key> and settings set <key> <value> implemented here; unknown keys exit 1; values validated per key"
         - "Long-running subcommands (watch) stop cleanly on SIGINT/Ctrl+C: in-flight placement finishes, never half-written; exit 0"
@@ -335,7 +402,7 @@ stories:
         - "A throw or limit breach fails the export with module name, line, and message"
         - "ctx.args, ctx.only_globs (directory transforms), ctx.repos (id->name), ctx.log(msg), ctx.context.note(key, value) (context accumulator), ctx.render(template[@N], params) (MiniJinja host call)"
         - "The same (source, args, input folder) produces byte-identical output across two runs"
-        - "flatten transform add <file.js> --name <n> [--reverses <n>]; flatten transform ls, transform run <file.js> <folder>, transform rm, transform reset <name> (builtin reset-to-shipped)"
+        - "flatten transform add <file.js> --name <name> [--reverses <name>]; flatten transform ls, transform run <file.js> <folder>, transform rm, transform reset <name> (builtin reset-to-shipped)"
       verification:
         - "flatten transform run fixtures/transforms/upper.js fixtures/tree-a --json prints the resulting folder listing; running twice prints identical output"
         - "fixtures/transforms/loop.js exits 1 with a timeout error; escape.js (writes ../x) exits 1 naming the transform; globals.js run twice shows no state carried"
@@ -711,6 +778,8 @@ stories:
       verification:
         - "cargo test -p flatten-core history:: reconstructs content at every entry of a 12-entry fixture chain"
         - "Place three versions of one file via watch; flatten history show repo-a src/main.rs --json shows snapshot, diff, diff with placed_by populated"
+
+# --- s2 (desktop UI + product features) ---------------------------------------------------
 
   desktop-app:
 
