@@ -1,0 +1,58 @@
+/* src/index.css */
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  --color-bg: var(--app-bg);
+  --color-surface: var(--app-surface);
+  --color-overlay: var(--app-overlay);
+  --color-border: var(--app-border);
+  --color-border-muted: var(--app-border-muted);
+  --color-text: var(--app-text);
+  --color-text-muted: var(--app-text-muted);
+  --color-accent: var(--app-accent);
+  --color-success: var(--app-success);
+  --color-danger: var(--app-danger);
+  --color-warning: var(--app-warning);
+  --color-done: var(--app-done);
+}
+
+/* Light mode (Primer canvas-default) */
+:root {
+  --app-bg: #FFFFFF;
+  --app-surface: #F6F8FA;
+  --app-overlay: #FFFFFF;
+  --app-border: #D0D7DE;
+  --app-border-muted: #D8DEE4;
+  --app-text: #1F2328;
+  --app-text-muted: #656D76;
+  --app-accent: #0969DA;
+  --app-success: #1A7F37;
+  --app-danger: #CF222E;
+  --app-warning: #BF8700;
+  --app-done: #8250DF;
+}
+
+/* Dark mode (Primer canvas-default dark) */
+.dark {
+  --app-bg: #0D1117;
+  --app-surface: #161B22;
+  --app-overlay: #1C2128;
+  --app-border: #30363D;
+  --app-border-muted: #21262D;
+  --app-text: #E6EDF3;
+  --app-text-muted: #8B949E;
+  --app-accent: #2F81F7;
+  --app-success: #3FB950;
+  --app-danger: #F85149;
+  --app-warning: #D29922;
+  --app-done: #A371F7;
+}
+
+/* Base body styles. Prevents white flash before React mounts and
+   covers overscroll regions in Tauri's WebKit shell. */
+body {
+  background-color: var(--app-bg);
+  color: var(--app-text);
+}
