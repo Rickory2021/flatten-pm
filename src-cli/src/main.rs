@@ -198,7 +198,8 @@ impl From<ingest::error::Error> for CliError {
             | ingest::error::Error::RepoNotFound(_)
             | ingest::error::Error::InvalidPattern { .. }
             | ingest::error::Error::InvalidLineEndingPolicy { .. } => "domain",
-            ingest::error::Error::Io { .. } => "io",
+            ingest::error::Error::Io { .. }
+            | ingest::error::Error::Trie(flatten_core::trie::error::Error::Io { .. }) => "io",
             _ => "database",
         };
         CliError {

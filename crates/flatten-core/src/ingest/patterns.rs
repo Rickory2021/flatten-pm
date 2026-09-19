@@ -183,9 +183,11 @@ pub fn walk_and_hash(
 /// Prefix uses `trie::path_from_os` for forward-slash joining on all
 /// platforms (no backslash-as-escape on Windows).
 ///
-/// Malformed lines (unclosed `[`, invalid escape) are silently skipped,
-/// matching git behavior. Explicit `--pattern` flags go through
-/// `build_matcher` and fail loudly with `InvalidPattern`.
+/// Malformed lines (e.g. inverted ranges like `[z-a]`) are silently
+/// skipped via `add_line` validation. In practice the `ignore` crate
+/// accepts nearly everything git accepts; the skip is defensive.
+/// Explicit `--pattern` flags go through `build_matcher` and fail
+/// loudly with `InvalidPattern`.
 ///
 /// Returns pattern list in encounter order (no sort, no dedup; gitignore
 /// precedence is order-dependent).
@@ -744,18 +746,52 @@ mod tests {
 
     #[test]
     fn import_skips_malformed_lines() {
-        // The `ignore` crate treats most patterns as valid (matching git),
-        // including unclosed brackets like `[` (treated as a literal).
-        // The malformed-line skip via add_line is a defensive safety net.
-        // This test verifies that valid-but-odd patterns pass through correctly,
-        // and that the import pipeline doesn't choke on them.
-        let dir = test_dir_with_files(&[(".gitignore", "*.log\n[\nkeep.txt\n")]);
+        // `[z-a]` is an inverted character class range that globset rejects.
+        // The import pipeline silently drops it (matching git's lenient behavior).
+        let dir = test_dir_with_files(&[(".gitignore", "*.log\n[z-a]\nkeep.txt\n")]);
         let patterns = import_gitignore(dir.path()).expect("import failed");
 
         assert_eq!(
             patterns,
-            vec!["*.log", "[", "keep.txt"],
-            "all lines should pass through (ignore crate treats [ as a literal, matching git)"
+            vec!["*.log", "keep.txt"],
+            "malformed line '[z-a]' should be silently skipped"
+        );
+    }
+
+    #[test]
+    fn import_subdir_patterns_work_when_walked() {
+        // End-to-end: import a subdir .gitignore, then walk with the
+        // imported patterns. Proves the anchoring transform produces
+        // patterns that actually exclude correctly at walk time.
+        let dir = test_dir_with_files(&[
+            ("sub/.gitignore", "build/\n"),
+            ("sub/build/x.o", "object file"),
+            ("sub/deep/build/y.o", "deep object file"),
+            ("other/build/z.o", "unrelated build dir"),
+            ("root.txt", "root file"),
+        ]);
+
+        let patterns = import_gitignore(dir.path()).expect("import failed");
+        // Should produce sub/**/build/ (unanchored → **)
+        assert_eq!(patterns, vec!["sub/**/build/"]);
+
+        let paths = walk_paths(dir.path(), &patterns);
+
+        assert!(
+            !paths.iter().any(|p| p.starts_with("sub/build/")),
+            "sub/build/ should be excluded by imported pattern"
+        );
+        assert!(
+            !paths.iter().any(|p| p.starts_with("sub/deep/build/")),
+            "sub/deep/build/ should be excluded (** matches nested)"
+        );
+        assert!(
+            paths.contains(&"other/build/z.o".to_string()),
+            "other/build/z.o should be present (pattern is scoped to sub/)"
+        );
+        assert!(
+            paths.contains(&"root.txt".to_string()),
+            "root.txt should be present"
         );
     }
 }

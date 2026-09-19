@@ -109,8 +109,8 @@ fn update_trie_timestamp(writer: &db::writer::Writer, repo_id: i64) -> Result<()
 /// Sequence:
 ///   1. `canonicalize(path)` -> `NonExistentPath` if fails; `is_dir` check
 ///   2. `path.to_str()` -> `NonExistentPath` if non-UTF-8 (can't store in TEXT)
-///   3. Pre-check name uniqueness (`SELECT`, no `deleted_at` filter)
-///   4. `validate_line_ending_policy`
+///   3. `validate_line_ending_policy` (cheap local check before DB round-trip)
+///   4. Pre-check name uniqueness (`SELECT`, no `deleted_at` filter)
 ///   5. Optionally `import_gitignore`; merge: imported first, explicit after
 ///   6. `walk_and_hash` -> `(leaves, lossy_count)` (validates patterns internally)
 ///   7. `Trie::from_leaves` -> trie
@@ -146,7 +146,10 @@ pub fn register_repo(
         })?
         .to_string();
 
-    // 3. Pre-check name uniqueness (fast fail; UNIQUE is the real guard)
+    // 3. Validate line ending policy (cheap local check before DB round-trip)
+    validate_line_ending_policy(line_ending_policy)?;
+
+    // 4. Pre-check name uniqueness (fast fail; UNIQUE is the real guard)
     let name_for_check = name.to_string();
     let exists: bool = writer.call(move |conn| {
         let count: i64 = conn.query_row(
@@ -161,9 +164,6 @@ pub fn register_repo(
             name: name.to_string(),
         });
     }
-
-    // 4. Validate line ending policy
-    validate_line_ending_policy(line_ending_policy)?;
 
     // 5. Optionally import .gitignore; merge: imported first, explicit after
     let mut final_patterns = if import_gitignore {
@@ -718,26 +718,20 @@ mod tests {
         let repo_dir = test_dir_with_files(&[("a.txt", "hello")]);
         let writer = test_db(data_dir.path());
 
-        // Note: the `ignore` crate is very permissive (matching git).
-        // This tests that `build_matcher` propagates any error `add_line` returns.
-        // Finding a pattern that actually errors may be crate-version-dependent.
-        // We test the code path by verifying register_repo calls walk_and_hash
-        // which calls build_matcher, and that the InvalidPattern variant exists.
-        // If a future crate version rejects a pattern, this path catches it.
+        // `[z-a]` is an inverted character class range that globset rejects.
         let result = register_repo(
             &writer,
             data_dir.path(),
             repo_dir.path(),
             "bad-pattern",
-            &["valid_pattern".to_string()],
+            &["[z-a]".to_string()],
             "preserve",
             false,
         );
 
-        // With a valid pattern, registration succeeds (proves the path compiles)
         assert!(
-            result.is_ok(),
-            "valid pattern should not error: {result:?}"
+            matches!(result, Err(Error::InvalidPattern { .. })),
+            "inverted range [z-a] should return InvalidPattern, got: {result:?}"
         );
     }
 
