@@ -1,0 +1,3 @@
+# fixtures/repo-a/.gitignore
+node_modules/
+*.log

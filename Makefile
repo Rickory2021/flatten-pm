@@ -18,6 +18,7 @@ help:
 	@echo "  Development:"
 	@echo "    npm run tauri dev            Run Tauri app in dev mode"
 	@echo "    cargo test --workspace       Run all Rust tests"
+	@echo "    make fixtures                Generate test fixtures (node_modules)"
 	@echo ""
 	@echo "  Project sync:"
 	@echo "    make project-export              Export to Claude Project (default profile)"
@@ -27,6 +28,18 @@ help:
 	@echo ""
 	@echo "  Flatten-sync tests:"
 	@echo "    make project-test                Run flatten-sync unit tests"
+
+# -- Fixtures ------------------------------------------------------------
+
+.PHONY: fixtures
+
+fixtures:
+	@echo "Generating fixtures/repo-a/node_modules/ (1000 files)..."
+	@mkdir -p fixtures/repo-a/node_modules
+	@for i in $$(seq 1 1000); do \
+		echo "// dummy module $$i" > fixtures/repo-a/node_modules/mod_$$i.js; \
+	done
+	@echo "Done: 1000 files in fixtures/repo-a/node_modules/"
 
 # -- Project sync --------------------------------------------------------
 
