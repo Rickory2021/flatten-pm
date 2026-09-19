@@ -4,6 +4,12 @@
 // See: Repos and Ingest Flow contracts in docs/design/2_INGEST.md.
 
 pub mod error;
+mod patterns;
+
+pub use patterns::{import_gitignore, walk_and_hash};
+
+#[cfg(test)]
+mod test_util;
 
 /// Result of an ingest operation.
 #[derive(Debug, Clone)]
