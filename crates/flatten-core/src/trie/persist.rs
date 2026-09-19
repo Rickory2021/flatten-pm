@@ -52,6 +52,13 @@ pub(crate) fn save(trie: &Trie, path: &Path) -> Result<()> {
         path: path_str.clone(),
         source: std::io::Error::new(std::io::ErrorKind::NotFound, "no parent directory"),
     })?;
+    // Path::new("x.trie").parent() is Some(""), which fails NamedTempFile::new_in.
+    // Map empty parent to current directory.
+    let parent = if parent.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        parent
+    };
 
     let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| Error::Io {
         path: path_str.clone(),
@@ -262,58 +269,65 @@ fn validate(arena: &[NodeKind], free_head: Option<NodeIndex>, path: &str) -> Res
     Ok(())
 }
 
-/// Recursive tree walk for validation. Checks bounds, visited (DAG detection),
-/// children sort order, ROOT references, and Free nodes in the tree.
+/// Iterative tree walk for validation. Uses an explicit stack instead of
+/// recursion to avoid stack overflow on crafted deeply-nested files.
+/// Checks bounds, visited (DAG detection), children sort order, ROOT
+/// references, and Free nodes in the tree.
 fn validate_subtree(
     arena: &[NodeKind],
-    idx: NodeIndex,
+    root: NodeIndex,
     visited: &mut [bool],
     path: &str,
 ) -> Result<()> {
-    let i = idx.0 as usize;
-    if i >= arena.len() {
-        return Err(Error::Corrupt {
-            path: path.into(),
-            reason: format!("node index {i} out of bounds"),
-        });
-    }
-    if visited[i] {
-        return Err(Error::Corrupt {
-            path: path.into(),
-            reason: format!("node at index {i} has two parents"),
-        });
-    }
-    visited[i] = true;
+    let mut stack = vec![root];
 
-    match &arena[i] {
-        NodeKind::Dir { children, .. } => {
-            // Children must be sorted by name with no duplicates
-            for window in children.windows(2) {
-                if window[0].0 >= window[1].0 {
-                    return Err(Error::Corrupt {
-                        path: path.into(),
-                        reason: format!(
-                            "unsorted or duplicate children in Dir at index {i}"
-                        ),
-                    });
-                }
-            }
-            for (_, child_idx) in children {
-                if *child_idx == ROOT {
-                    return Err(Error::Corrupt {
-                        path: path.into(),
-                        reason: "child points at root (index 0)".into(),
-                    });
-                }
-                validate_subtree(arena, *child_idx, visited, path)?;
-            }
-        }
-        NodeKind::Leaf { .. } => {}
-        NodeKind::Free { .. } => {
+    while let Some(idx) = stack.pop() {
+        let i = idx.0 as usize;
+        if i >= arena.len() {
             return Err(Error::Corrupt {
                 path: path.into(),
-                reason: format!("tree walk reached Free node at index {i}"),
+                reason: format!("node index {i} out of bounds"),
             });
+        }
+        if visited[i] {
+            return Err(Error::Corrupt {
+                path: path.into(),
+                reason: format!("node at index {i} has two parents"),
+            });
+        }
+        visited[i] = true;
+
+        match &arena[i] {
+            NodeKind::Dir { children, .. } => {
+                // Children must be sorted by name with no duplicates
+                for window in children.windows(2) {
+                    if window[0].0 >= window[1].0 {
+                        return Err(Error::Corrupt {
+                            path: path.into(),
+                            reason: format!(
+                                "unsorted or duplicate children in Dir at index {i}"
+                            ),
+                        });
+                    }
+                }
+                // Push children in reverse so leftmost is processed first
+                for (_, child_idx) in children.iter().rev() {
+                    if *child_idx == ROOT {
+                        return Err(Error::Corrupt {
+                            path: path.into(),
+                            reason: "child points at root (index 0)".into(),
+                        });
+                    }
+                    stack.push(*child_idx);
+                }
+            }
+            NodeKind::Leaf { .. } => {}
+            NodeKind::Free { .. } => {
+                return Err(Error::Corrupt {
+                    path: path.into(),
+                    reason: format!("tree walk reached Free node at index {i}"),
+                });
+            }
         }
     }
 
@@ -364,6 +378,32 @@ mod tests {
         let loaded = load(&path).expect("load should succeed");
 
         assert_eq!(trie, loaded, "save then load should roundtrip exactly");
+    }
+
+    #[test]
+    fn free_list_roundtrip() {
+        let mut trie = Trie::new();
+        trie.insert("a", leaf([1u8; 32])).unwrap();
+        trie.insert("b", leaf([2u8; 32])).unwrap();
+        trie.insert("c", leaf([3u8; 32])).unwrap();
+        trie.remove("b").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("freelist.trie");
+
+        save(&trie, &path).expect("save should succeed");
+        let mut loaded = load(&path).expect("load should succeed");
+
+        assert_eq!(trie, loaded, "trie with free list should roundtrip exactly");
+
+        // Prove the loaded free list is live: insert reuses the freed slot
+        let arena_before = loaded.arena.len();
+        loaded.insert("d", leaf([4u8; 32])).unwrap();
+        assert_eq!(
+            loaded.arena.len(),
+            arena_before,
+            "insert after load should reuse freed slot, not grow arena"
+        );
     }
 
     #[test]
@@ -541,7 +581,9 @@ mod tests {
 
     #[test]
     fn missing_file_returns_error() {
-        let result = load(Path::new("/tmp/nonexistent-flatten-trie-test.trie"));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.trie");
+        let result = load(&path);
         assert!(
             matches!(result, Err(Error::NotFound { .. })),
             "missing file should be NotFound, got {result:?}"
@@ -593,10 +635,9 @@ mod tests {
 
     #[test]
     fn save_missing_parent_returns_io() {
-        let result = save(
-            &Trie::new(),
-            Path::new("/nonexistent-flatten-dir/test.trie"),
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-subdir").join("test.trie");
+        let result = save(&Trie::new(), &missing);
         assert!(
             matches!(result, Err(Error::Io { .. })),
             "missing parent dir should be Io, got {result:?}"
