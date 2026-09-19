@@ -28,7 +28,7 @@ struct NodeIndex(u32);
 /// Root is always arena[0].
 const ROOT: NodeIndex = NodeIndex(0);
 
-/// Arena node. Leaf and Dir only in this chunk; Free added in chunk 3.
+/// Arena node.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum NodeKind {
     Leaf {
@@ -40,6 +40,9 @@ enum NodeKind {
         /// Sorted by name in byte order (String::cmp, locale-independent).
         children: Vec<(String, NodeIndex)>,
         merkle_hash: [u8; 32],
+    },
+    Free {
+        next: Option<NodeIndex>, // free list pointer
     },
 }
 
@@ -53,8 +56,8 @@ pub struct LeafNode {
 
 /// Arena-backed file trie with BLAKE3 Merkle hashes.
 ///
-/// Always-clean invariant: every insert eagerly recomputes ancestor Merkle
-/// hashes. All accessors are `&self` and infallible.
+/// Always-clean invariant: every insert and remove eagerly recomputes
+/// ancestor Merkle hashes. All accessors are `&self` and infallible.
 ///
 /// `PartialEq` is structural (arena layout), not logical. Two tries with
 /// identical leaves but different insertion orders may compare unequal.
@@ -62,7 +65,7 @@ pub struct LeafNode {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trie {
     arena: Vec<NodeKind>,
-    // free_head added in chunk 3 with the Free variant
+    free_head: Option<NodeIndex>,
 }
 
 impl Default for Trie {
@@ -172,6 +175,7 @@ fn compute_merkle_hash(children: &[(String, NodeIndex)], arena: &[NodeKind]) -> 
         let child_hash = match &arena[child_idx.0 as usize] {
             NodeKind::Leaf { content_hash, .. } => *content_hash,
             NodeKind::Dir { merkle_hash, .. } => *merkle_hash,
+            NodeKind::Free { .. } => [0u8; 32], // Defensive; validated trees never hit this
         };
         hasher.update(&child_hash);
     }
@@ -195,16 +199,46 @@ impl Trie {
                 children: Vec::new(),
                 merkle_hash: empty_merkle_hash(),
             }],
+            free_head: None,
         }
     }
 
     // --- Private helpers ---
 
-    /// Allocate a new arena slot. Returns the index.
+    /// Allocate a new arena slot, reusing from the free list if available.
     fn alloc_node(&mut self, kind: NodeKind) -> Result<NodeIndex> {
+        if let Some(free_idx) = self.free_head {
+            if let NodeKind::Free { next } = self.arena[free_idx.0 as usize] {
+                self.free_head = next;
+                self.arena[free_idx.0 as usize] = kind;
+                return Ok(free_idx);
+            }
+            // Defensive: free_head pointed at a non-Free node. Clear and fall through.
+            self.free_head = None;
+        }
         let idx = u32::try_from(self.arena.len()).map_err(|_| Error::ArenaFull)?;
         self.arena.push(kind);
         Ok(NodeIndex(idx))
+    }
+
+    /// Add a node to the free list.
+    fn free_node(&mut self, idx: NodeIndex) {
+        self.arena[idx.0 as usize] = NodeKind::Free {
+            next: self.free_head,
+        };
+        self.free_head = Some(idx);
+    }
+
+    /// Recursively free a node and all its descendants.
+    fn free_subtree(&mut self, idx: NodeIndex) {
+        let child_indices: Vec<NodeIndex> = match &self.arena[idx.0 as usize] {
+            NodeKind::Dir { children, .. } => children.iter().map(|(_, ci)| *ci).collect(),
+            _ => Vec::new(),
+        };
+        for ci in child_indices {
+            self.free_subtree(ci);
+        }
+        self.free_node(idx);
     }
 
     /// Find a child by name in a Dir node. Returns None if the parent is not
@@ -220,13 +254,21 @@ impl Trie {
     }
 
     /// Insert a child into a Dir node's children list in sorted position.
-    /// Caller must ensure the name is not already present.
     fn add_child(&mut self, parent: NodeIndex, name: String, child: NodeIndex) {
         if let NodeKind::Dir { children, .. } = &mut self.arena[parent.0 as usize] {
-            let pos = children
-                .binary_search_by(|(n, _)| n.as_str().cmp(&name))
-                .unwrap_or_else(|pos| pos);
-            children.insert(pos, (name, child));
+            match children.binary_search_by(|(n, _)| n.as_str().cmp(&name)) {
+                Ok(pos) => children[pos].1 = child, // Replace existing
+                Err(pos) => children.insert(pos, (name, child)),
+            }
+        }
+    }
+
+    /// Remove a child by name from a Dir node's children list.
+    fn remove_child(&mut self, parent: NodeIndex, name: &str) {
+        if let NodeKind::Dir { children, .. } = &mut self.arena[parent.0 as usize]
+            && let Ok(pos) = children.binary_search_by(|(n, _)| n.as_str().cmp(name))
+        {
+            children.remove(pos);
         }
     }
 
@@ -235,7 +277,7 @@ impl Trie {
         let new_hash = {
             match &self.arena[idx.0 as usize] {
                 NodeKind::Dir { children, .. } => compute_merkle_hash(children, &self.arena),
-                _ => return, // Not a dir
+                _ => return, // Not a dir (Leaf or Free)
             }
         };
         if let NodeKind::Dir { merkle_hash, .. } = &mut self.arena[idx.0 as usize] {
@@ -263,9 +305,9 @@ impl Trie {
 
     /// Insert or replace a leaf. Intermediate directories created as needed.
     ///
-    /// If the path currently names a directory, it is replaced (leaf wins).
-    /// If a prefix of the path is currently a leaf, it becomes a directory.
-    /// Eagerly recomputes ancestor Merkle hashes.
+    /// If the path currently names a directory, it is replaced (leaf wins);
+    /// the old subtree is freed. If a prefix of the path is currently a leaf,
+    /// it becomes a directory. Eagerly recomputes ancestor Merkle hashes.
     pub fn insert(&mut self, path: &str, leaf: LeafNode) -> Result<()> {
         validate_path(path)?;
 
@@ -306,8 +348,16 @@ impl Trie {
         let child = self.find_child(current, last_segment);
         match child {
             Some(idx) => {
-                // Replace existing node (dir-becomes-leaf orphans subtree;
-                // chunk 3 adds free_subtree before this overwrite)
+                // If replacing a directory, free its entire subtree first
+                let child_indices: Vec<NodeIndex> = match &self.arena[idx.0 as usize] {
+                    NodeKind::Dir { children, .. } => {
+                        children.iter().map(|(_, ci)| *ci).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                for ci in child_indices {
+                    self.free_subtree(ci);
+                }
                 self.arena[idx.0 as usize] = NodeKind::Leaf {
                     content_hash: leaf.content_hash,
                     size: leaf.size,
@@ -332,6 +382,70 @@ impl Trie {
         Ok(())
     }
 
+    /// Remove a leaf. Returns `Ok(true)` if removed, `Ok(false)` if the path
+    /// did not exist or names a directory (leaf-only, no subtree removal).
+    ///
+    /// Prunes empty ancestor directories up to (not including) root.
+    /// Eagerly recomputes ancestor Merkle hashes.
+    pub fn remove(&mut self, path: &str) -> Result<bool> {
+        validate_path(path)?;
+
+        let segments: Vec<&str> = path.split('/').collect();
+
+        // Walk the path, collecting node indices.
+        // path_nodes[0] = ROOT, path_nodes[i+1] = node for segments[i].
+        let mut path_nodes: Vec<NodeIndex> = vec![ROOT];
+        let mut current = ROOT;
+
+        for &segment in &segments[..segments.len() - 1] {
+            match self.find_child(current, segment) {
+                Some(idx)
+                    if matches!(&self.arena[idx.0 as usize], NodeKind::Dir { .. }) =>
+                {
+                    path_nodes.push(idx);
+                    current = idx;
+                }
+                _ => return Ok(false), // Path doesn't exist or intermediate is not a dir
+            }
+        }
+
+        // Check the target (last segment)
+        let last = segments[segments.len() - 1];
+        let target = match self.find_child(current, last) {
+            Some(idx) if matches!(&self.arena[idx.0 as usize], NodeKind::Leaf { .. }) => idx,
+            _ => return Ok(false), // Not found or is a directory
+        };
+
+        // Remove the leaf from its parent
+        self.remove_child(current, last);
+        self.free_node(target);
+
+        // Prune empty ancestor dirs bottom-up (skip root, which is path_nodes[0]).
+        // path_nodes[i+1] is the node for segments[i], parented by path_nodes[i].
+        for i in (0..segments.len() - 1).rev() {
+            let dir_idx = path_nodes[i + 1];
+            let is_empty = matches!(
+                &self.arena[dir_idx.0 as usize],
+                NodeKind::Dir { children, .. } if children.is_empty()
+            );
+            if !is_empty {
+                break;
+            }
+            let parent_idx = path_nodes[i];
+            self.remove_child(parent_idx, segments[i]);
+            self.free_node(dir_idx);
+        }
+
+        // Recompute Merkle for surviving path nodes bottom-up
+        for &idx in path_nodes.iter().rev() {
+            if matches!(&self.arena[idx.0 as usize], NodeKind::Dir { .. }) {
+                self.recompute_merkle(idx);
+            }
+        }
+
+        Ok(true)
+    }
+
     // --- Public queries ---
 
     /// Get leaf metadata. None if not found or is a directory.
@@ -348,7 +462,7 @@ impl Trie {
                 size: *size,
                 mtime: *mtime,
             }),
-            _ => None,
+            _ => None, // Dir or Free
         }
     }
 
@@ -371,7 +485,7 @@ impl Trie {
         let idx = self.resolve_path(dir)?;
         match &self.arena[idx.0 as usize] {
             NodeKind::Dir { merkle_hash, .. } => Some(*merkle_hash),
-            _ => None,
+            _ => None, // Leaf or Free
         }
     }
 
@@ -390,6 +504,12 @@ impl Trie {
             .map(|n| n.size == size && n.mtime == mtime)
             .unwrap_or(false)
     }
+
+    /// Number of arena slots (including free). Test-only.
+    #[cfg(test)]
+    fn arena_len(&self) -> usize {
+        self.arena.len()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +519,7 @@ impl Trie {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     /// Helper: leaf with given hash, zero stat metadata.
     fn leaf(hash: [u8; 32]) -> LeafNode {
@@ -434,6 +555,214 @@ mod tests {
         assert_eq!(got.mtime, 1_000_000_000, "mtime mismatch");
         assert_eq!(got, l, "full LeafNode mismatch");
     }
+
+    #[test]
+    fn insert_remove_absent() {
+        let mut trie = Trie::new();
+        trie.insert("a/b", leaf([1u8; 32])).unwrap();
+        assert!(trie.has("a/b"), "should exist before remove");
+
+        let removed = trie.remove("a/b").unwrap();
+        assert!(removed, "remove should return true");
+        assert_eq!(trie.get("a/b"), None, "should be absent after remove");
+    }
+
+    #[test]
+    fn insert_replaces_existing_leaf() {
+        let mut trie = Trie::new();
+        let h1 = [1u8; 32];
+        let h2 = [2u8; 32];
+        trie.insert("f", leaf(h1)).unwrap();
+        let root_before = trie.root_hash();
+        let arena_before = trie.arena_len();
+
+        trie.insert("f", leaf(h2)).unwrap();
+        assert_eq!(
+            trie.leaf_hash("f"),
+            Some(h2),
+            "leaf should have the new hash after re-insert"
+        );
+        assert_ne!(
+            trie.root_hash(),
+            root_before,
+            "root_hash should change after replacing a leaf"
+        );
+        assert_eq!(
+            trie.arena_len(),
+            arena_before,
+            "arena should not grow when replacing an existing leaf"
+        );
+    }
+
+    #[test]
+    fn remove_prunes_empty_ancestors() {
+        let mut trie = Trie::new();
+        let empty_root = trie.root_hash();
+
+        trie.insert("a/b/c", leaf([1u8; 32])).unwrap();
+        assert!(trie.subtree_hash("a").is_some(), "a should be a dir");
+        assert!(trie.subtree_hash("a/b").is_some(), "a/b should be a dir");
+
+        trie.remove("a/b/c").unwrap();
+
+        assert_eq!(
+            trie.subtree_hash("a"),
+            None,
+            "a should be pruned (not found)"
+        );
+        assert_eq!(
+            trie.subtree_hash("a/b"),
+            None,
+            "a/b should be pruned (not found)"
+        );
+        assert_eq!(
+            trie.root_hash(),
+            empty_root,
+            "root hash should match empty trie after removing all leaves"
+        );
+    }
+
+    #[test]
+    fn remove_missing_returns_false() {
+        let mut trie = Trie::new();
+        let result = trie.remove("nonexistent").unwrap();
+        assert!(!result, "remove on missing path should return Ok(false)");
+
+        // Also test removing through a leaf intermediate: "a" is a leaf,
+        // "a/b" does not exist because "a" is not a directory.
+        trie.insert("a", leaf([1u8; 32])).unwrap();
+        let result = trie.remove("a/b").unwrap();
+        assert!(
+            !result,
+            "remove through a leaf intermediate should return Ok(false)"
+        );
+        assert!(trie.has("a"), "the leaf at 'a' should be untouched");
+    }
+
+    #[test]
+    fn remove_directory_returns_false() {
+        let mut trie = Trie::new();
+        trie.insert("dir/file", leaf([1u8; 32])).unwrap();
+        let result = trie.remove("dir").unwrap();
+        assert!(
+            !result,
+            "remove on a directory path should return Ok(false)"
+        );
+        assert!(trie.has("dir/file"), "file should still exist");
+    }
+
+    #[test]
+    fn remove_invalid_path() {
+        let mut trie = Trie::new();
+        let result = trie.remove("a/../b");
+        assert!(
+            matches!(result, Err(Error::InvalidPath(_))),
+            "remove with .. should return InvalidPath"
+        );
+    }
+
+    #[test]
+    fn merkle_changes_on_remove() {
+        let mut trie = Trie::new();
+        trie.insert("file", leaf([1u8; 32])).unwrap();
+        let hash_before = trie.root_hash();
+
+        trie.remove("file").unwrap();
+        assert_ne!(
+            trie.root_hash(),
+            hash_before,
+            "root_hash should change after remove"
+        );
+    }
+
+    #[test]
+    fn remove_recomputes_intermediate_dirs() {
+        // Remove a/b while a/c survives. Proves intermediate dir "a" and root
+        // are both recomputed, not just root.
+        let mut trie = Trie::new();
+        trie.insert("a/b", leaf([1u8; 32])).unwrap();
+        trie.insert("a/c", leaf([2u8; 32])).unwrap();
+
+        trie.remove("a/b").unwrap();
+
+        // Build a reference trie with only a/c
+        let mut expected = Trie::new();
+        expected.insert("a/c", leaf([2u8; 32])).unwrap();
+
+        assert_eq!(
+            trie.root_hash(),
+            expected.root_hash(),
+            "root_hash after removing a/b should equal a trie with only a/c"
+        );
+    }
+
+    #[test]
+    fn replace_directory_with_leaf() {
+        let mut trie = Trie::new();
+        trie.insert("a/b", leaf([1u8; 32])).unwrap();
+        trie.insert("a/c", leaf([2u8; 32])).unwrap();
+        assert!(trie.subtree_hash("a").is_some(), "a should be a dir");
+
+        let arena_before = trie.arena_len();
+
+        // Replace directory "a" with a leaf
+        trie.insert("a", leaf([3u8; 32])).unwrap();
+        assert!(trie.has("a"), "a should now be a leaf");
+        assert_eq!(trie.get("a/b"), None, "a/b should be gone");
+        assert_eq!(trie.get("a/c"), None, "a/c should be gone");
+
+        // Insert two more leaves; both freed slots should be reused
+        trie.insert("x", leaf([4u8; 32])).unwrap();
+        trie.insert("y", leaf([5u8; 32])).unwrap();
+        assert_eq!(
+            trie.arena_len(),
+            arena_before,
+            "arena should not grow; freed slots should be reused (before={arena_before}, after={})",
+            trie.arena_len()
+        );
+    }
+
+    #[test]
+    fn free_list_reuse() {
+        let mut trie = Trie::new();
+        trie.insert("a", leaf([1u8; 32])).unwrap();
+        trie.insert("b", leaf([2u8; 32])).unwrap();
+        let size_after_insert = trie.arena_len();
+
+        trie.remove("a").unwrap();
+        trie.remove("b").unwrap();
+
+        // Re-insert: should reuse freed slots
+        trie.insert("c", leaf([3u8; 32])).unwrap();
+        trie.insert("d", leaf([4u8; 32])).unwrap();
+        assert_eq!(
+            trie.arena_len(),
+            size_after_insert,
+            "arena should not grow after reusing freed slots"
+        );
+    }
+
+    #[test]
+    fn arc_clone_preserves_old_state() {
+        let mut trie = Trie::new();
+        trie.insert("file", leaf([1u8; 32])).unwrap();
+
+        let mut shared = Arc::new(trie);
+        let snapshot = Arc::clone(&shared);
+
+        // Mutate via make_mut (copy-on-write)
+        let trie_mut = Arc::make_mut(&mut shared);
+        trie_mut.insert("new_file", leaf([2u8; 32])).unwrap();
+
+        // Snapshot should be unchanged
+        assert!(snapshot.has("file"), "snapshot should still have 'file'");
+        assert!(
+            !snapshot.has("new_file"),
+            "snapshot should not have 'new_file'"
+        );
+    }
+
+    // --- Queries (from chunk 2, unchanged) ---
 
     #[test]
     fn has_leaf_true() {
