@@ -794,6 +794,40 @@ stories:
 
   desktop-app:
 
+    APP-000:
+      story: >
+        As a developer, the app has a navigation shell with routing, theme
+        switching, and a resizable watch dock, so that every desktop feature
+        has a consistent place to live.
+      stage: s2
+      status: done
+      acceptance_criteria:
+        - "Tailwind v4 via @tailwindcss/vite; no tailwind.config file (CSS-first @theme)"
+        - "GitHub Primer color palette as semantic tokens (bg, surface, border, text, accent, success, danger, warning, done); light and dark values swap via .dark class on <html>"
+        - "Dark mode default; manual toggle persists to localStorage; inline <head> script prevents flash on load"
+        - "React Router v7 MemoryRouter (no address bar, no SPA fallback needed in Tauri prod)"
+        - "Fixed 220px sidebar with NavLink navigation for 8 routes: repos, recipes, transforms, templates, bindings, watch, settings, dev-tools"
+        - "Active route visually distinct (bg-bg, text-accent, left border)"
+        - "react-resizable-panels v4 vertical Group: content panel + collapsible watch dock; dock starts collapsed (defaultSize 0%); layout persists via useDefaultLayout"
+        - "Watch status indicator in sidebar (hardcoded idle/0 flags, marked MOCK pending APP-002)"
+        - "Placeholder pages for all 8 routes; no mock data in pages"
+        - "@/ path alias in tsconfig paths and vite resolve.alias"
+        - "Greet template artifacts removed (App.css, react.svg, tauri.svg)"
+      verification:
+        - "npm run dev serves at :1420; all 8 routes render; theme toggle swaps and persists; dock collapses and expands; layout persists across reload"
+        - "npx tsc --noEmit passes clean"
+        - "cargo tauri dev renders the shell in the native window"
+      notes: >
+        Frontend-only story. DoD criteria 3 (flatten-core unit tests) and 4
+        (CLI coverage) do not apply. Delivered across six commits on main:
+        chore(ui) deps, feat(ui) theme, feat(ui) router, feat(ui) sidebar,
+        feat(ui) panels, feat(ui) theme toggle. Design decisions (Tailwind,
+        shadcn deferred to APP-001+, Primer palette, MemoryRouter, v4 panels)
+        recorded in the Phase 2 tech spec working doc. shadcn/ui components
+        and Radix deps land with the first story that needs forms.
+        Default window size (800x600) is tight for a 220px sidebar; bump in
+        the first story that touches src-tauri/tauri.conf.json.
+
     APP-001:
       story: >
         As a developer, I can activate recipes through pipeline bindings in the
