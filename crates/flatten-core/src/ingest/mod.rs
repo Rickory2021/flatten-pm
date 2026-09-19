@@ -13,9 +13,9 @@ mod test_util;
 
 use std::path::{Path, PathBuf};
 
+use error::{Error, Result};
 use crate::db;
 use crate::trie;
-use error::{Error, Result};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -298,6 +298,204 @@ pub fn load_or_reingest(
 }
 
 // ---------------------------------------------------------------------------
+// Public API — repo CRUD
+// ---------------------------------------------------------------------------
+
+/// List all non-deleted repos.
+pub fn list_repos(conn: &rusqlite::Connection) -> Result<Vec<RepoRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, path, name, ingest_patterns, line_ending_policy, \
+             trie_updated_at, created_at, deleted_at \
+             FROM repos WHERE deleted_at IS NULL ORDER BY name",
+        )
+        .map_err(db::error::Error::from)?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        })
+        .map_err(db::error::Error::from)?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        let (id, path, name, patterns_json, policy, trie_ts, created, deleted) =
+            row.map_err(db::error::Error::from)?;
+        let patterns: Vec<String> = serde_json::from_str(&patterns_json)?;
+        result.push(RepoRow {
+            id,
+            path,
+            name,
+            ingest_patterns: patterns,
+            line_ending_policy: policy,
+            trie_updated_at: trie_ts,
+            created_at: created,
+            deleted_at: deleted,
+        });
+    }
+    Ok(result)
+}
+
+/// Get a repo by name. Returns `RepoNotFound` if missing or soft-deleted.
+pub fn get_repo_by_name(conn: &rusqlite::Connection, name: &str) -> Result<RepoRow> {
+    use rusqlite::OptionalExtension;
+
+    let maybe_row = conn
+        .query_row(
+            "SELECT id, path, name, ingest_patterns, line_ending_policy, \
+             trie_updated_at, created_at, deleted_at \
+             FROM repos WHERE name = ?1 AND deleted_at IS NULL",
+            [name],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(db::error::Error::from)?;
+
+    let (id, path, repo_name, patterns_json, policy, trie_ts, created, deleted) =
+        maybe_row.ok_or_else(|| Error::RepoNotFound(name.to_string()))?;
+
+    let patterns: Vec<String> = serde_json::from_str(&patterns_json)?;
+    Ok(RepoRow {
+        id,
+        path,
+        name: repo_name,
+        ingest_patterns: patterns,
+        line_ending_policy: policy,
+        trie_updated_at: trie_ts,
+        created_at: created,
+        deleted_at: deleted,
+    })
+}
+
+/// Soft-delete a repo (set `deleted_at`). Returns `RepoNotFound` if the
+/// id doesn't exist or is already deleted.
+///
+/// Trie file left on disk; s2 reaps orphaned files.
+///
+/// [DEFERRED: DA-005] Active binding guard: soft-deleting a repo with
+/// active bindings is a domain error naming the bindings.
+pub fn soft_delete_repo(writer: &db::writer::Writer, repo_id: i64) -> Result<()> {
+    let id = repo_id;
+    let changed = writer.call_write(move |conn| {
+        let rows = conn
+            .execute(
+                "UPDATE repos SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE id = ?1 AND deleted_at IS NULL",
+                [id],
+            )
+            .map_err(db::error::Error::from)?;
+        Ok(rows)
+    })?;
+
+    if changed == 0 {
+        return Err(Error::RepoNotFound(format!("id {repo_id}")));
+    }
+    Ok(())
+}
+
+/// Edit repo fields (name, patterns, line_ending_policy).
+///
+/// Only updates fields where the `Option` is `Some`. Uses `COALESCE`
+/// for partial update. Re-ingests after any edit (including pure rename).
+///
+/// Sequence: validate policy -> validate patterns via `build_matcher` ->
+/// `UPDATE` with `COALESCE` -> `reingest`.
+pub fn edit_repo(
+    writer: &db::writer::Writer,
+    data_dir: &Path,
+    repo_id: i64,
+    new_name: Option<&str>,
+    new_patterns: Option<&[String]>,
+    new_line_ending_policy: Option<&str>,
+) -> Result<(trie::Trie, IngestReport)> {
+    use rusqlite::OptionalExtension;
+
+    // Validate line ending policy if provided
+    if let Some(policy) = new_line_ending_policy {
+        validate_line_ending_policy(policy)?;
+    }
+
+    // If new patterns, validate via build_matcher (need repo path for root)
+    if let Some(pats) = new_patterns {
+        let id = repo_id;
+        let maybe_path = writer.call(move |conn| {
+            conn.query_row(
+                "SELECT path FROM repos WHERE id = ?1 AND deleted_at IS NULL",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(db::error::Error::from)
+        })?;
+        let path_str =
+            maybe_path.ok_or_else(|| Error::RepoNotFound(format!("id {repo_id}")))?;
+        let root = PathBuf::from(&path_str);
+        patterns::build_matcher(&root, pats)?;
+    }
+
+    // UPDATE with COALESCE
+    let new_name_owned = new_name.map(|s| s.to_string());
+    let new_patterns_json = new_patterns
+        .map(serde_json::to_string)
+        .transpose()?;
+    let new_policy_owned = new_line_ending_policy.map(|s| s.to_string());
+    let name_for_err = new_name.unwrap_or("").to_string();
+
+    let id = repo_id;
+    let changed = writer
+        .call_write(move |conn| {
+            let rows = conn
+                .execute(
+                    "UPDATE repos SET \
+                     name = COALESCE(?1, name), \
+                     ingest_patterns = COALESCE(?2, ingest_patterns), \
+                     line_ending_policy = COALESCE(?3, line_ending_policy) \
+                     WHERE id = ?4 AND deleted_at IS NULL",
+                    rusqlite::params![new_name_owned, new_patterns_json, new_policy_owned, id],
+                )
+                .map_err(db::error::Error::from)?;
+            Ok(rows)
+        })
+        .map_err(|e| {
+            if let db::error::Error::RuSQLite(rusqlite::Error::SqliteFailure(ref err, _)) = e
+                && err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            {
+                return Error::DuplicateName {
+                    name: name_for_err,
+                };
+            }
+            Error::Database(e)
+        })?;
+
+    if changed == 0 {
+        return Err(Error::RepoNotFound(format!("id {repo_id}")));
+    }
+
+    // Reingest with updated config
+    reingest(writer, data_dir, repo_id)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -478,8 +676,7 @@ mod tests {
         let trie_path = data_dir.path().join("tries").join(format!("{id}.trie"));
         assert!(
             trie_path.exists(),
-            "trie file should exist at {}",
-            trie_path.display()
+            "trie file should exist at {}", trie_path.display()
         );
     }
 
@@ -538,7 +735,10 @@ mod tests {
         );
 
         // With a valid pattern, registration succeeds (proves the path compiles)
-        assert!(result.is_ok(), "valid pattern should not error: {result:?}");
+        assert!(
+            result.is_ok(),
+            "valid pattern should not error: {result:?}"
+        );
     }
 
     #[test]
@@ -692,8 +892,15 @@ mod tests {
         let (trie, report) =
             reingest(&writer, data_dir.path(), id).expect("reingest should succeed");
 
-        assert_eq!(trie.list("").len(), 3, "trie should have 3 leaves");
-        assert_eq!(report.file_count, 3, "report should match trie leaf count");
+        assert_eq!(
+            trie.list("").len(),
+            3,
+            "trie should have 3 leaves"
+        );
+        assert_eq!(
+            report.file_count, 3,
+            "report should match trie leaf count"
+        );
     }
 
     #[test]
@@ -758,8 +965,15 @@ mod tests {
         let (trie, report) =
             load_or_reingest(&writer, data_dir.path(), id).expect("recovery should succeed");
 
-        assert!(report.is_some(), "report should be Some (re-ingest ran)");
-        assert_eq!(trie.list("").len(), 1, "recovered trie should have 1 leaf");
+        assert!(
+            report.is_some(),
+            "report should be Some (re-ingest ran)"
+        );
+        assert_eq!(
+            trie.list("").len(),
+            1,
+            "recovered trie should have 1 leaf"
+        );
     }
 
     #[test]
@@ -786,8 +1000,15 @@ mod tests {
         let (trie, report) =
             load_or_reingest(&writer, data_dir.path(), id).expect("recovery should succeed");
 
-        assert!(report.is_some(), "report should be Some (re-ingest ran)");
-        assert_eq!(trie.list("").len(), 1, "recovered trie should have 1 leaf");
+        assert!(
+            report.is_some(),
+            "report should be Some (re-ingest ran)"
+        );
+        assert_eq!(
+            trie.list("").len(),
+            1,
+            "recovered trie should have 1 leaf"
+        );
     }
 
     #[test]
@@ -814,6 +1035,431 @@ mod tests {
             report.is_none(),
             "report should be None (loaded from file, no re-ingest)"
         );
-        assert_eq!(trie.list("").len(), 1, "loaded trie should have 1 leaf");
+        assert_eq!(
+            trie.list("").len(),
+            1,
+            "loaded trie should have 1 leaf"
+        );
+    }
+
+    // --- CRUD tests (42-52) ---
+
+    #[test]
+    fn list_repos_returns_registered() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = test_dir_with_files(&[("a.txt", "hello")]);
+        let writer = test_db(data_dir.path());
+
+        register_repo(
+            &writer,
+            data_dir.path(),
+            repo_dir.path(),
+            "list-test",
+            &[],
+            "preserve",
+            false,
+        )
+        .expect("register should succeed");
+
+        let conn = test_reader(data_dir.path());
+        let repos = list_repos(&conn).expect("list should succeed");
+
+        assert!(
+            repos.iter().any(|r| r.name == "list-test"),
+            "registered repo should appear in list"
+        );
+    }
+
+    #[test]
+    fn list_repos_excludes_deleted() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = test_dir_with_files(&[("a.txt", "hello")]);
+        let writer = test_db(data_dir.path());
+
+        let (id, _) = register_repo(
+            &writer,
+            data_dir.path(),
+            repo_dir.path(),
+            "del-list-test",
+            &[],
+            "preserve",
+            false,
+        )
+        .expect("register should succeed");
+
+        soft_delete_repo(&writer, id).expect("soft delete should succeed");
+
+        let conn = test_reader(data_dir.path());
+        let repos = list_repos(&conn).expect("list should succeed");
+
+        assert!(
+            !repos.iter().any(|r| r.name == "del-list-test"),
+            "soft-deleted repo should not appear in list"
+        );
+    }
+
+    #[test]
+    fn get_repo_by_name_found_and_not_found() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = test_dir_with_files(&[("a.txt", "hello")]);
+        let writer = test_db(data_dir.path());
+
+        register_repo(
+            &writer,
+            data_dir.path(),
+            repo_dir.path(),
+            "get-test",
+            &[],
+            "preserve",
+            false,
+        )
+        .expect("register should succeed");
+
+        let conn = test_reader(data_dir.path());
+
+        // Happy path
+        let row = get_repo_by_name(&conn, "get-test").expect("get should succeed");
+        assert_eq!(row.name, "get-test", "name should match");
+        assert_eq!(
+            row.line_ending_policy, "preserve",
+            "policy should match"
+        );
+
+        // Error path
+        let result = get_repo_by_name(&conn, "nonexistent");
+        assert!(
+            matches!(result, Err(Error::RepoNotFound(_))),
+            "unknown name should return RepoNotFound, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn soft_delete_sets_deleted_at() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = test_dir_with_files(&[("a.txt", "hello")]);
+        let writer = test_db(data_dir.path());
+
+        let (id, _) = register_repo(
+            &writer,
+            data_dir.path(),
+            repo_dir.path(),
+            "soft-del-test",
+            &[],
+            "preserve",
+            false,
+        )
+        .expect("register should succeed");
+
+        soft_delete_repo(&writer, id).expect("soft delete should succeed");
+
+        let conn = test_reader(data_dir.path());
+        let deleted_at: Option<String> = conn
+            .query_row(
+                "SELECT deleted_at FROM repos WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .expect("row should exist");
+
+        assert!(
+            deleted_at.is_some(),
+            "deleted_at should be set after soft delete"
+        );
+    }
+
+    #[test]
+    fn soft_delete_unknown_not_found() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let writer = test_db(data_dir.path());
+
+        let result = soft_delete_repo(&writer, 99999);
+
+        assert!(
+            matches!(result, Err(Error::RepoNotFound(_))),
+            "unknown id should return RepoNotFound, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn edit_repo_renames() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = test_dir_with_files(&[("a.txt", "hello")]);
+        let writer = test_db(data_dir.path());
+
+        let (id, _) = register_repo(
+            &writer,
+            data_dir.path(),
+            repo_dir.path(),
+            "old-name",
+            &[],
+            "preserve",
+            false,
+        )
+        .expect("register should succeed");
+
+        edit_repo(&writer, data_dir.path(), id, Some("new-name"), None, None)
+            .expect("edit should succeed");
+
+        let conn = test_reader(data_dir.path());
+
+        // Old name gone
+        let old = get_repo_by_name(&conn, "old-name");
+        assert!(
+            matches!(old, Err(Error::RepoNotFound(_))),
+            "old name should not be found"
+        );
+
+        // New name works
+        let new = get_repo_by_name(&conn, "new-name").expect("new name should be found");
+        assert_eq!(new.id, id, "id should be unchanged after rename");
+    }
+
+    #[test]
+    fn edit_repo_rename_collision() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let repo_a = test_dir_with_files(&[("a.txt", "hello")]);
+        let repo_b = test_dir_with_files(&[("b.txt", "world")]);
+        let writer = test_db(data_dir.path());
+
+        let (id_a, _) = register_repo(
+            &writer,
+            data_dir.path(),
+            repo_a.path(),
+            "repo-a",
+            &[],
+            "preserve",
+            false,
+        )
+        .expect("register a should succeed");
+
+        register_repo(
+            &writer,
+            data_dir.path(),
+            repo_b.path(),
+            "repo-b",
+            &[],
+            "preserve",
+            false,
+        )
+        .expect("register b should succeed");
+
+        // Try to rename a to b's name
+        let result = edit_repo(
+            &writer,
+            data_dir.path(),
+            id_a,
+            Some("repo-b"),
+            None,
+            None,
+        );
+
+        assert!(
+            matches!(result, Err(Error::DuplicateName { .. })),
+            "rename collision should return DuplicateName, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn edit_repo_updates_patterns_reingests() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = test_dir_with_files(&[
+            ("a.txt", "hello"),
+            ("b.log", "log entry"),
+        ]);
+        let writer = test_db(data_dir.path());
+
+        let (id, report1) = register_repo(
+            &writer,
+            data_dir.path(),
+            repo_dir.path(),
+            "edit-pat-test",
+            &[],
+            "preserve",
+            false,
+        )
+        .expect("register should succeed");
+
+        assert_eq!(report1.file_count, 2, "both files initially ingested");
+
+        // Add *.log exclusion
+        let (_, report2) = edit_repo(
+            &writer,
+            data_dir.path(),
+            id,
+            None,
+            Some(&["*.log".to_string()]),
+            None,
+        )
+        .expect("edit should succeed");
+
+        assert_eq!(
+            report2.file_count, 1,
+            "after adding *.log pattern, only a.txt should remain"
+        );
+        assert_ne!(
+            report1.root_hash, report2.root_hash,
+            "root hash should change after pattern edit"
+        );
+    }
+
+    #[test]
+    fn edit_repo_validates_before_storing() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = test_dir_with_files(&[("a.txt", "hello")]);
+        let writer = test_db(data_dir.path());
+
+        let (id, _) = register_repo(
+            &writer,
+            data_dir.path(),
+            repo_dir.path(),
+            "val-test",
+            &[],
+            "preserve",
+            false,
+        )
+        .expect("register should succeed");
+
+        // Invalid line ending policy should fail without changing the row
+        let result = edit_repo(
+            &writer,
+            data_dir.path(),
+            id,
+            None,
+            None,
+            Some("crlf"),
+        );
+
+        assert!(
+            matches!(result, Err(Error::InvalidLineEndingPolicy { .. })),
+            "invalid policy should error, got: {result:?}"
+        );
+
+        // Verify row is unchanged
+        let conn = test_reader(data_dir.path());
+        let policy: String = conn
+            .query_row(
+                "SELECT line_ending_policy FROM repos WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .expect("row should exist");
+        assert_eq!(
+            policy, "preserve",
+            "policy should be unchanged after failed edit"
+        );
+    }
+
+    #[test]
+    fn list_repos_corrupt_json_error() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = test_dir_with_files(&[("a.txt", "hello")]);
+        let writer = test_db(data_dir.path());
+
+        let (id, _) = register_repo(
+            &writer,
+            data_dir.path(),
+            repo_dir.path(),
+            "corrupt-json-test",
+            &[],
+            "preserve",
+            false,
+        )
+        .expect("register should succeed");
+
+        // Corrupt the ingest_patterns column
+        let corrupt_id = id;
+        writer
+            .call_write(move |conn| {
+                conn.execute(
+                    "UPDATE repos SET ingest_patterns = 'not-valid-json' WHERE id = ?1",
+                    [corrupt_id],
+                )
+                .map_err(db::error::Error::from)?;
+                Ok(())
+            })
+            .expect("corrupt should succeed");
+
+        let conn = test_reader(data_dir.path());
+        let result = list_repos(&conn);
+
+        assert!(
+            matches!(result, Err(Error::Json(_))),
+            "corrupt JSON should return Json error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn stored_patterns_is_ssot() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = test_dir_with_files(&[
+            (".gitignore", "*.log\n"),
+            ("a.txt", "hello"),
+            ("debug.log", "log entry"),
+        ]);
+        let writer = test_db(data_dir.path());
+
+        // Register with gitignore import: *.log is imported, debug.log excluded
+        let (id, report1) = register_repo(
+            &writer,
+            data_dir.path(),
+            repo_dir.path(),
+            "ssot-test",
+            &[],
+            "preserve",
+            true,
+        )
+        .expect("register should succeed");
+
+        // .gitignore + a.txt (debug.log excluded by *.log)
+        assert_eq!(
+            report1.file_count, 2,
+            "initial: .gitignore and a.txt (debug.log excluded)"
+        );
+
+        // (a) Edit the on-disk .gitignore: change to *.txt
+        std::fs::write(repo_dir.path().join(".gitignore"), "*.txt\n")
+            .expect("write should succeed");
+
+        // Reingest: reads STORED patterns (["*.log"]), not the disk .gitignore.
+        // debug.log should still be excluded (stored *.log still applies).
+        // a.txt should still be included (stored patterns don't exclude it).
+        // Root hash WILL differ because .gitignore content changed, but the
+        // same set of files is included, proving SSOT.
+        let (trie2, report2) =
+            reingest(&writer, data_dir.path(), id).expect("reingest should succeed");
+
+        assert_eq!(
+            report2.file_count, 2,
+            "after .gitignore edit: still 2 files (.gitignore + a.txt; debug.log still excluded by stored *.log)"
+        );
+        assert!(
+            trie2.has("a.txt"),
+            "a.txt should still be included (stored patterns don't exclude *.txt)"
+        );
+        assert!(
+            !trie2.has("debug.log"),
+            "debug.log should still be excluded (stored *.log is SSOT)"
+        );
+
+        // (b) Edit stored patterns: change to *.txt
+        let (_, report3) = edit_repo(
+            &writer,
+            data_dir.path(),
+            id,
+            None,
+            Some(&["*.txt".to_string()]),
+            None,
+        )
+        .expect("edit should succeed");
+
+        assert_ne!(
+            report1.root_hash, report3.root_hash,
+            "root hash should change after editing stored patterns"
+        );
+        // Now .gitignore + debug.log (a.txt excluded by *.txt)
+        assert_eq!(
+            report3.file_count, 2,
+            "after *.txt: .gitignore and debug.log (a.txt excluded)"
+        );
     }
 }
