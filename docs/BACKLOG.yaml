@@ -828,6 +828,42 @@ stories:
         Default window size (800x600) is tight for a 220px sidebar; bump in
         the first story that touches src-tauri/tauri.conf.json.
 
+    APP-008:
+      story: >
+        As a developer, the Settings page and DB inspector work end-to-end
+        through Tauri IPC, so that the managed-state and error patterns are
+        proven before binding and pipeline UI land.
+      stage: s2
+      status: in-progress
+      acceptance_criteria:
+        - "Settings page lists all 9 settings and edits any of them with validation feedback; values persist across page reloads"
+        - "Settings validation: positive integer keys reject zero and non-numeric; watch_source_dir rejects non-absolute and non-existent paths; empty string accepted (unset)"
+        - "Dev Tools page lists tables and runs read-only SQL with results displayed as a table; write statements rejected; results capped at 1000 rows with a truncation note"
+        - "Tauri managed state provides a Writer and database path to all commands; startup failure exits with a message, never panics"
+        - "Errors serialize to the frontend as structured JSON with an error message and a kind discriminator (domain or database)"
+        - "Window defaults to 1200x800 with 800x600 minimum"
+        - "greet template command removed"
+      verification:
+        - "cargo tauri dev: settings page renders 9 settings; edit watch_poll_interval_ms, save, reload, value persists"
+        - "cargo tauri dev: dev tools lists tables; SELECT count(*) FROM settings renders; INSERT rejected"
+        - "flatten settings get watch_poll_interval_ms --json after a GUI edit shows the new value (cross-process)"
+        - "npx tsc --noEmit passes clean"
+        - "cargo clippy --workspace -- -D warnings passes clean"
+        - "cargo test --workspace passes (14 new tests in src-tauri)"
+      notes: >
+        Establishes the managed-state pattern (Writer directly, no Mutex),
+        error serialization (CommandError struct with kind), and the
+        init-before-builder startup pattern that APP-001 and later stories
+        build on. Settings validation duplicated from CLI-001 (deferred);
+        moves to flatten-core when CLI picks up its deferred AC. Tech spec
+        filed at docs/specs/APP-008.md. Open findings: F-phase3-01 (settings
+        not a watch reload trigger), F-phase3-02 (binary_extensions format),
+        F-phase3-03 (db/settings functions belong in flatten-core),
+        F-phase3-04 (APP-001 AC says reader pool, ADR-038 rejected pools),
+        F-phase3-05 (CLI error kind wrong for unknown key), F-phase3-06
+        (workspace lints once src-cli cleaned), F-phase3-07 (CI runs no
+        clippy).
+
     APP-001:
       story: >
         As a developer, I can activate recipes through pipeline bindings in the
