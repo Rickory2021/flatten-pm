@@ -33,6 +33,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::settings::settings_list,
             commands::settings::settings_set,
+            commands::db::db_tables,
+            commands::db::db_query,
         ])
         .run(tauri::generate_context!());
 
