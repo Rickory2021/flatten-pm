@@ -20,6 +20,13 @@ pub(crate) fn test_dir_with_files(files: &[(&str, &str)]) -> tempfile::TempDir {
     dir
 }
 
+/// Open a `Writer` (with migrations and seed) at `{data_dir}/flatten.db`.
+/// The data_dir doubles as the parent for `tries/`.
+pub(crate) fn test_db(data_dir: &Path) -> crate::db::writer::Writer {
+    let db_path = data_dir.join("flatten.db");
+    crate::db::writer::Writer::open(&db_path).expect("failed to open test db")
+}
+
 /// RAII guard that restores file permissions on drop.
 ///
 /// After setting restrictive permissions (e.g. `chmod 000`), call
