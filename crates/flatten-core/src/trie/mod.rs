@@ -596,6 +596,21 @@ impl Trie {
         }
     }
 
+    // --- Persistence ---
+
+    /// Serialize to MessagePack with a fixed binary header.
+    /// Atomic write: tempfile in the same directory, fsync, then rename.
+    /// Caller is responsible for creating the parent directory.
+    pub fn save(&self, path: &std::path::Path) -> Result<()> {
+        persist::save(self, path)
+    }
+
+    /// Deserialize from MessagePack. Validates header, format version,
+    /// and structural integrity.
+    pub fn load(path: &std::path::Path) -> Result<Trie> {
+        persist::load(path)
+    }
+
     /// Number of arena slots (including free). Test-only.
     #[cfg(test)]
     fn arena_len(&self) -> usize {
