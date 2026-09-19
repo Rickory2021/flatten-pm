@@ -11,6 +11,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ThemeToggle } from "./ThemeToggle";
 
 const primaryNav = [
   { to: "/repos", label: "Repos", icon: FolderGit2 },
@@ -83,9 +84,11 @@ export function Sidebar() {
         <div className="flex items-center gap-2 text-xs text-text-muted">
           <span className="h-2 w-2 rounded-full bg-success shrink-0" />
           <span>Idle</span>
-          <span className="ml-auto">0 flags</span>
+          <span>0 flags</span>
+          <span className="ml-auto">
+            <ThemeToggle />
+          </span>
         </div>
-        {/* ThemeToggle: C6 */}
       </div>
     </aside>
   );
