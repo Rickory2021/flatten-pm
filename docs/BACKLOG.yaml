@@ -275,32 +275,43 @@ stories:
         As a developer, repo file tries survive app restarts, so that watch
         detection works immediately without a full re-ingest.
       stage: s1
-      status: backlog
+      status: done-deferred
+      # [DEFERRED: IN-001] repos.trie_updated_at written on every persist
+      # [DEFERRED: IN-001] persist is debounced (dirty flag, quiescence, shutdown)
+      # [DEFERRED: IN-001] missing/corrupt file triggers full re-ingest + warning
+      # [DEFERRED: IN-001] refresh builds new trie off-lock, swaps Arc
+      # [DEFERRED: IN-001] refresh reports whether root_hash changed
+      # [DEFERRED: IN-001] full re-hash: stat + hash every file
+      # [DEFERRED: IN-001] stat-based refresh: compare (size, mtime), re-hash changed
+      # [DEFERRED: WA-001] copy-on-write: Arc::make_mut, re-hash placed file, swap Arc
+      # [DEFERRED: IN-001] verification: flatten repo add / flatten repo ls CLI commands
+      # [DEFERRED: IN-001] verification: truncate trie file, flatten repo ls recovers
       acceptance_criteria:
-        - "Trie API: insert(path, hash), remove(path), get(path), has(path), list(prefix) sorted by path, leaf_hash(path), subtree_hash(dir), root_hash()"
+        - "Trie API: insert(path, LeafNode), remove(path), get(path), has(path), list(prefix) sorted by path, leaf_hash(path), subtree_hash(dir), root_hash(), stat_matches(path, size, mtime), from_leaves(iter)"
         - "Leaf: (path, content_hash, size, mtime); size and mtime are cache metadata for stat-based refresh, not hashed into the Merkle tree"
         - "Leaf hash: BLAKE3 over raw bytes only; no line-ending normalization"
         - "Directory nodes carry a Merkle hash over sorted (child_name, child_hash), recomputed on mutation"
         - "Paths stored as String, case-sensitive; non-UTF-8 names converted lossily and logged"
         - "Arena storage: Vec<Node> with index-based references behind Arc<Trie>"
         - "Serialized to MessagePack via rmp-serde at tries/{repo_id}.trie"
-        - "Atomic writes via tempfile + rename in the same directory"
-        - "Persist is debounced (dirty flag; written after quiescence and on shutdown), not per mutation"
-        - "repos.trie_updated_at written on every persist"
-        - "Missing or corrupt file triggers full re-ingest and a warning; never a crash"
-        - "Refresh builds a new trie off-lock and swaps the Arc; readers never observe a partial trie; callers holding a clone of the old Arc keep it for their operation"
-        - "Refresh reports whether root_hash changed"
-        - "Full re-hash: stat + hash every file; runs at session start, on repo reingest --full, and when trie file is missing or corrupt"
-        - "Stat-based refresh: compare each file's current (size, mtime) against the leaf; re-hash only changed or new files; remove leaves for deleted files; recompute Merkle for affected subtrees; runs on the 30s timer"
-        - "Copy-on-write: watch placement uses Arc::make_mut, re-hashes the placed file, updates leaf and directory hashes, swaps the Arc"
+        - "Atomic writes via tempfile + fsync + rename in the same directory"
+        - "Persist is debounced (dirty flag; written after quiescence and on shutdown), not per mutation [DEFERRED: IN-001]"
+        - "repos.trie_updated_at written on every persist [DEFERRED: IN-001]"
+        - "Missing or corrupt file triggers full re-ingest and a warning; never a crash [DEFERRED: IN-001, trie returns NotFound/Corrupt/UnsupportedFormat errors]"
+        - "Refresh builds a new trie off-lock and swaps the Arc; readers never observe a partial trie; callers holding a clone of the old Arc keep it for their operation [DEFERRED: IN-001]"
+        - "Refresh reports whether root_hash changed [DEFERRED: IN-001]"
+        - "Full re-hash: stat + hash every file; runs at session start, on repo reingest --full, and when trie file is missing or corrupt [DEFERRED: IN-001]"
+        - "Stat-based refresh: compare each file's current (size, mtime) against the leaf; re-hash only changed or new files; remove leaves for deleted files; recompute Merkle for affected subtrees; runs on the 30s timer [DEFERRED: IN-001]"
+        - "Copy-on-write: watch placement uses Arc::make_mut, re-hashes the placed file, updates leaf and directory hashes, swaps the Arc [DEFERRED: WA-001, trie side proven by arc_clone test]"
       verification:
-        - "cargo test -p flatten-core trie:: covers insert/remove, Merkle recompute, sorted list, lossy path conversion, case-sensitive keys, stat-based refresh (changed mtime triggers rehash, unchanged skips), copy-on-write update"
-        - "flatten repo add fixtures/repo-a --name repo-a then flatten repo ls --json shows trie_updated_at set and tries/<id>.trie present"
-        - "Truncate tries/<id>.trie, run flatten repo ls; log shows re-ingest, file regenerated, command exits 0"
+        - "cargo test -p flatten-core trie:: covers insert/remove, Merkle recompute, sorted list, lossy path conversion, case-sensitive keys, stat-based refresh (stat_matches tests), copy-on-write (arc_clone test), persistence roundtrip, structural validation"
+        - "flatten repo add fixtures/repo-a --name repo-a then flatten repo ls --json shows trie_updated_at set and tries/<id>.trie present [DEFERRED: IN-001]"
+        - "Truncate tries/<id>.trie, run flatten repo ls; log shows re-ingest, file regenerated, command exits 0 [DEFERRED: IN-001]"
       notes: >
         F-43: arena and snapshot cadence are suggested implementation details,
         not hard contracts. The trie is an internal type; its in-memory shape
-        is a build-time decision.
+        is a build-time decision. Implementation details documented in code;
+        cross-story contracts promoted to docs/design/2_INGEST.md Trie section.
 
     IN-001:
       story: >

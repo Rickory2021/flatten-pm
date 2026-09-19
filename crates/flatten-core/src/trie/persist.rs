@@ -3,15 +3,10 @@
 // Trie persistence: fixed binary header, MessagePack serialization,
 // structural validation, atomic save, and load.
 //
-// File format:
-//   Bytes 0..4:  b"FTRI"           (magic)
-//   Bytes 4..8:  u32 LE            (format version, currently 1)
-//   Bytes 8..:   MessagePack body  (TriePayload, positional encoding)
-//
-// Wire format stability: rmp_serde::to_vec encodes struct fields by position
-// and enum variants by name. Renaming a NodeKind variant, adding/removing/
-// reordering fields within a variant, or changing payload field order changes
-// the on-disk format and must bump CURRENT_FORMAT_VERSION.
+// File format and wire stability rules per docs/design/2_INGEST.md
+// Trie section. Do not change NodeKind variant names, field order
+// within variants, or payload field order without bumping
+// CURRENT_FORMAT_VERSION.
 
 use super::error::{Error, Result};
 use super::{NodeIndex, NodeKind, Trie, ROOT};
@@ -577,6 +572,47 @@ mod tests {
                 "Dir on free list should be Corrupt, got {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn load_deep_chain_does_not_stack_overflow() {
+        // Build a deeply nested chain of single-child Dirs directly in the
+        // arena. This exercises the iterative validate_subtree; the old
+        // recursive version would overflow the stack at this depth.
+        let depth = 100_000;
+        let mut arena = Vec::with_capacity(depth + 1);
+
+        // arena[0] = root Dir pointing to arena[1]
+        // arena[1] = Dir pointing to arena[2]
+        // ...
+        // arena[depth-1] = Dir pointing to arena[depth]
+        // arena[depth] = Leaf
+        for i in 0..depth {
+            arena.push(NodeKind::Dir {
+                children: vec![(format!("d{i}"), NodeIndex((i + 1) as u32))],
+                merkle_hash: [0u8; 32],
+            });
+        }
+        arena.push(NodeKind::Leaf {
+            content_hash: [1u8; 32],
+            size: 0,
+            mtime: 0,
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deep.trie");
+        write_raw(
+            &path,
+            &MAGIC,
+            CURRENT_FORMAT_VERSION,
+            &valid_body(&arena, None),
+        );
+
+        let result = load(&path);
+        assert!(
+            result.is_ok(),
+            "deeply nested valid trie should load without stack overflow, got {result:?}"
+        );
     }
 
     #[test]

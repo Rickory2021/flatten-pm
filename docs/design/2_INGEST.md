@@ -81,7 +81,7 @@ flowchart TD
 
     file_check --> file_match{"Matches an<br/>exclude pattern?"}
     file_match -->|yes| skip_file["Skip file"]
-    file_match -->|no| hash_file["BLAKE3 hash file content,<br/>add leaf to trie (path, hash)"]
+    file_match -->|no| hash_file["BLAKE3 hash file content,<br/>add leaf to trie (path, hash, size, mtime)"]
 
     hash_file --> more_files{"More files?"}
     skip_file --> more_files
@@ -122,33 +122,81 @@ watch, updated by watch on placement.
 
 | Node | Fields | Hash |
 |---|---|---|
-| Leaf | `(path, content_hash, size, mtime)` | BLAKE3 over raw file bytes. No normalization, no mode, no permissions. `(size, mtime)` are cache metadata for stat-based refresh; they are not hashed into the Merkle tree. |
-| Directory | children | Merkle: BLAKE3 over sorted `(child_name, child_hash)`. Recomputed on mutation. |
+| Leaf | `(path, content_hash, size, mtime)` | BLAKE3 over raw file bytes. No normalization, no mode, no permissions. `(size, mtime)` are cache metadata for stat-based refresh; they are not hashed into the Merkle tree. `mtime` is `i64` nanoseconds since epoch. `LeafNode` is the struct carrying `(content_hash, size, mtime)`; path is the key. |
+| Directory | children | Merkle hash (see encoding below). Recomputed on mutation. |
 | Root | — | Identifies the whole repo state. One comparison for the short-circuit. |
 
-Paths are `String`, case-sensitive. Non-UTF-8 names converted lossily and
-logged. Symlinks are leaves whose content is the link target string.
+**Paths:**
+
+Trie paths are relative, forward-slash separated, case-sensitive `String` values.
+No leading or trailing slash, no `.` or `..` segments, no empty segments.
+`validate_path()` enforces these rules; `insert` and `remove` return
+`Error::InvalidPath` on violation; query methods treat invalid paths as not-found.
+
+Non-UTF-8 filesystem paths are converted via `path_from_os(&Path)`, which
+iterates `Path::components()`, converts each `Normal` segment lossily, joins
+with `/`, and returns `Result<(String, was_lossy: bool)>`. Returns
+`Error::InvalidPath` on `..`, absolute paths, Windows prefixes, or leading
+`./`. The library returns the flag; callers decide how to surface the lossy
+warning (F-53 defers the logging contract).
+Symlinks are leaves whose content is the link target string.
 
 **API:**
 
-| Method | Returns |
+| Method | Returns | Notes |
+|---|---|---|
+| `insert(path, LeafNode)` | `Result<()>` | Creates intermediate dirs. Existing leaf at path: overwritten. Existing directory at path: subtree discarded, replaced with leaf. Eagerly recomputes ancestor Merkle. |
+| `remove(path)` | `Result<bool>` | Leaf-only. Prunes empty ancestors up to root. `Ok(false)` if missing or is directory. |
+| `get(path)` | `Option<LeafNode>` | |
+| `has(path)` | `bool` | Leaf-only. |
+| `list(prefix)` | `Vec<String>` | Sorted by byte order of full `/`-joined path. Subtree walk. Prefix naming a leaf returns that single path. |
+| `leaf_hash(path)` | `Option<[u8; 32]>` | |
+| `subtree_hash(dir)` | `Option<[u8; 32]>` | Empty string returns root hash. |
+| `root_hash()` | `[u8; 32]` | |
+| `stat_matches(path, size, mtime)` | `bool` | True if leaf exists with matching `(size, mtime)`. Used by stat-based refresh. |
+| `from_leaves(impl IntoIterator<Item = (String, LeafNode)>)` | `Result<Trie>` | Bulk constructor. One post-order Merkle pass. Duplicate paths: last wins. |
+
+**Merkle encoding (pinned):**
+
+Per child in sorted-by-name order (byte order, `String::cmp`, locale-independent):
+
+```
+[name_len: u32 LE] [name_bytes: name_len bytes] [child_hash: 32 bytes]
+```
+
+Concatenated, then BLAKE3-hashed. Empty directory hashes to BLAKE3 of empty
+input. No kind tag (leaf vs dir): a name can only be one thing in a given
+parent. This encoding is persisted in `export_state.repo_root_hashes` and
+drives the short-circuit. Changing it invalidates every stored hash.
+
+**File format:**
+
+| Offset | Content |
 |---|---|
-| `insert(path, hash)` | — |
-| `remove(path)` | — |
-| `get(path)` | `Option<LeafNode>` |
-| `has(path)` | `bool` |
-| `list(prefix)` | Sorted iterator of paths under prefix |
-| `leaf_hash(path)` | `Option<Hash>` |
-| `subtree_hash(dir)` | `Option<Hash>` (Merkle of the subtree) |
-| `root_hash()` | `Hash` |
+| `0..4` | Magic: `b"FTRI"` |
+| `4..8` | Format version: `u32 LE` (currently `1`) |
+| `8..` | MessagePack body (positional via `rmp_serde::to_vec`) |
+
+**Wire format stability:** `rmp_serde::to_vec` encodes struct fields by position
+and enum variants by name (string tag). Renaming a `NodeKind` variant,
+adding/removing/reordering fields within a variant, or changing payload field
+order changes the on-disk format and must bump the format version constant.
+Reordering variants is safe (name-tagged).
+
+Structural validation runs on every `load`. Corrupt or unrecognized-version
+files return structured errors; the caller triggers re-ingest. Error variants:
+`NotFound` (file absent), `Corrupt` (bad magic, deserialization failure,
+structural violation), `UnsupportedFormat` (unknown version), `Io` (other).
+Callers match `NotFound | Corrupt | UnsupportedFormat` to re-ingest; `Io`
+surfaces as a failure.
 
 **Storage:**
 
 | Property | Value |
 |---|---|
 | In-memory | Arena (`Vec<Node>`, index-based references) behind `Arc<Trie>` |
-| On-disk | MessagePack via rmp-serde at `tries/{repo_id}.trie` |
-| Write | Atomic (tempfile + rename in same directory). Debounced: dirty flag, written on quiescence and shutdown, not per mutation. |
+| On-disk | MessagePack with fixed 8-byte header at `tries/{repo_id}.trie` |
+| Write | Atomic (tempfile + fsync + rename in same directory). Debounced: dirty flag, written on quiescence and shutdown, not per mutation. |
 | `repos.trie_updated_at` | Written on every persist. |
 | Recovery | Missing or corrupt file triggers full re-ingest and a warning, never a crash. |
 
@@ -158,8 +206,8 @@ logged. Symlinks are leaves whose content is the link target string.
 |---|---|
 | Load | Into `Arc<Trie>` on startup. |
 | Full re-hash | Stat + hash every file. Runs at session start, on `repo reingest --full`, and when the trie file is missing or corrupt. |
-| Stat-based refresh | Stat walk: compare each file's current `(size, mtime)` against the leaf. Re-hash only files where either changed or files that are new. Remove leaves for files that no longer exist. Recompute Merkle hashes for affected subtrees. Runs on the 30s timer. |
-| Refresh | Build new trie off-lock, swap the Arc. Readers never see a partial tree. Callers holding a clone of the old Arc keep it for their operation. |
+| Stat-based refresh | Stat walk: compare each file's current `(size, mtime)` against the leaf via `stat_matches`. Re-hash only files where either changed or files that are new. Remove leaves for files that no longer exist. Recompute Merkle hashes for affected subtrees. Runs on the 30s timer. |
+| Refresh | Build new trie off-lock (via `from_leaves`), swap the Arc. Readers never see a partial tree. Callers holding a clone of the old Arc keep it for their operation. |
 | Refresh reports | Whether `root_hash` changed (so watch can decide whether to reload its resolution state). |
 | Export pins | Snapshot the Arc at run start. Consistent for the duration of the run. |
 | Watch re-ingests | Every active repo at session start (full re-hash; never trusts the file after a crash). Stat-based refresh on the 30s timer thereafter. |
@@ -225,4 +273,3 @@ or `lf` (everything gets LF). Applied by watch at placement, not at ingest.
 | Column | Purpose |
 |---|---|
 | `safety_allowlist` | Rule IDs and paths to skip during export safety scan |
-

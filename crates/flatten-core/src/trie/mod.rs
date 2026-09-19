@@ -5,11 +5,8 @@
 // The trie is the hashed picture of a registered repo. Built by ingest,
 // read by export and watch, updated by watch on placement.
 //
-// Merkle encoding (pinned, do not change without bumping format version):
-// Per child in sorted-by-name order (byte order, String::cmp):
-//   [name_len: u32 LE] [name_bytes: name_len bytes] [child_hash: 32 bytes]
-// Concatenated, then hashed with BLAKE3.
-// Empty directory: BLAKE3 of empty input.
+// Merkle encoding per docs/design/2_INGEST.md Trie section.
+// Locked by merkle_golden_hash test.
 
 pub mod error;
 mod path;
@@ -83,10 +80,7 @@ impl Default for Trie {
 // ---------------------------------------------------------------------------
 
 /// Compute the Merkle hash for a directory from its children.
-///
-/// Encoding (pinned): per child in sorted order,
-///   `[name_len: u32 LE] [name_bytes] [child_hash: 32 bytes]`
-/// concatenated, then BLAKE3-hashed.
+/// Encoding per `docs/design/2_INGEST.md`; locked by `merkle_golden_hash`.
 fn compute_merkle_hash(children: &[(String, NodeIndex)], arena: &[NodeKind]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     for (name, child_idx) in children {
@@ -151,6 +145,10 @@ impl Trie {
     }
 
     /// Recursively free a node and all its descendants.
+    ///
+    /// Recursive by design: only called on trees we built or already validated,
+    /// so depth is bounded by filesystem path limits. The untrusted-input path
+    /// (load → validate) uses an iterative stack instead.
     fn free_subtree(&mut self, idx: NodeIndex) {
         let child_indices: Vec<NodeIndex> = match &self.arena[idx.0 as usize] {
             NodeKind::Dir { children, .. } => children.iter().map(|(_, ci)| *ci).collect(),
@@ -301,6 +299,9 @@ impl Trie {
     /// Recursively recompute Merkle hashes for a subtree, post-order.
     /// Children are recomputed before their parent, so each directory sees
     /// up-to-date child hashes. O(N) in subtree size.
+    ///
+    /// Recursive by design: only called on trees we built (from_leaves),
+    /// so depth is bounded by filesystem path limits.
     fn recompute_subtree(&mut self, idx: NodeIndex) {
         let child_indices: Vec<NodeIndex> = match &self.arena[idx.0 as usize] {
             NodeKind::Dir { children, .. } => children.iter().map(|(_, ci)| *ci).collect(),
@@ -498,6 +499,9 @@ impl Trie {
     }
 
     /// Recursively collect leaf paths from a subtree.
+    ///
+    /// Recursive by design: only called on trees we built or validated,
+    /// so depth is bounded by filesystem path limits.
     fn collect_leaves(&self, idx: NodeIndex, prefix: &str, result: &mut Vec<String>) {
         match &self.arena[idx.0 as usize] {
             NodeKind::Dir { children, .. } => {
