@@ -269,7 +269,9 @@ Global key-value configuration. Simple KV table in SQLite.
 | `copy_size_limit_mb` | int | 64 | Export (max file size for `COPY`) |
 | `binary_extensions` | list | seeded list | Export (`EXCLUDE` --binary) |
 
-`watch_source_dir` has no default. OS-detected download paths surfaced as
+`watch_source_dir` has no default. When set, the value must be an absolute
+path to an existing directory; relative paths and non-existent paths are
+rejected. Empty string means unset. OS-detected download paths surfaced as
 suggestions when unset.
 
 Note: `DEPTH_TOLERANCE` and line-ending policy are per-repo/per-recipe, not

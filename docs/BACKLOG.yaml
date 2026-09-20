@@ -284,7 +284,7 @@ stories:
       status: done-deferred
       # [RESOLVED: IN-001] fixtures convention: fixtures/README.md documents it
       # [DEFERRED: WA-001] SIGINT handling: needs watch session
-      # [DEFERRED: unassigned] settings value validation: needs typed settings contract (F-phase3-03 moves to flatten-core)
+      # [DEFERRED: unassigned] settings value validation: needs typed settings contract (F-56 moves to flatten-core)
       acceptance_criteria:
         - "Subcommand groups reserved: db, repo, recipe, transform, template, binding, export, watch, flag, history, settings"
         - "--data-dir <path> overrides the app data directory for tries, export folders, database, PID file"
@@ -304,7 +304,12 @@ stories:
         F-52: session restart (--since last) is a v2 concern. F-53: logging
         contract (tracing, NDJSON event stream) to be settled during
         implementation; the story establishes the CLI frame, not the logging
-        architecture.
+        architecture. F-56: settings validation and db/settings SQL are
+        duplicated in src-tauri; both should move to flatten-core so CLI and
+        GUI call one implementation. F-57: CLI maps unknown-key errors to
+        kind "database"; design doc says "domain". F-58: adopt workspace-level
+        clippy unwrap_used/expect_used deny once src-cli's non-test expect/unwrap
+        calls are removed.
 
     DA-002:
       story: >
@@ -432,7 +437,9 @@ stories:
         F-17: shipped recipe colon grammar (optional for childless blocks) to
         be settled during parser implementation. F-22: lexical rules subsection
         in grammar contract to be documented in RECIPE.md. F-31: committed
-        comment "line" should be "span" in the enrichment contract.
+        comment "line" should be "span" in the enrichment contract. F-55:
+        binary_extensions format is unspecified (leading dot, case, spaces);
+        the parse rule belongs in EXCLUDE --binary implementation.
 
     EX-002B:
       story: >
@@ -787,7 +794,9 @@ stories:
         - "cargo test -p flatten-core watch::reload covers change_counter polling and state reload"
       notes: >
         F-41: reload timing vs in-flight file. The contract is: reloads
-        happen between files, never mid-placement.
+        happen between files, never mid-placement. F-54: settings edits
+        (watch_source_dir, watch_poll_interval_ms, etc.) are not listed as
+        reload triggers; decide whether they should bump change_counter.
 
   data-and-auditability:
 
@@ -877,7 +886,7 @@ stories:
         through Tauri IPC, so that the managed-state and error patterns are
         proven before binding and pipeline UI land.
       stage: s2
-      status: in-progress
+      status: done
       acceptance_criteria:
         - "Settings page lists all 9 settings and edits any of them with validation feedback; values persist across page reloads"
         - "Settings validation: positive integer keys reject zero and non-numeric; watch_source_dir rejects non-absolute and non-existent paths; empty string accepted (unset)"
@@ -898,14 +907,14 @@ stories:
         error serialization (CommandError struct with kind), and the
         init-before-builder startup pattern that APP-001 and later stories
         build on. Settings validation duplicated from CLI-001 (deferred);
-        moves to flatten-core when CLI picks up its deferred AC. Tech spec
-        filed at docs/specs/APP-008.md. Open findings: F-phase3-01 (settings
-        not a watch reload trigger), F-phase3-02 (binary_extensions format),
-        F-phase3-03 (db/settings functions belong in flatten-core),
-        F-phase3-04 (APP-001 AC says reader pool, ADR-038 rejected pools),
-        F-phase3-05 (CLI error kind wrong for unknown key), F-phase3-06
-        (workspace lints once src-cli cleaned), F-phase3-07 (CI runs no
-        clippy).
+        moves to flatten-core when CLI picks up its deferred AC. Tauri
+        command return types require Debug; Setting and QueryResult derive it
+        (APP-001 will hit the same pattern). DoD criteria 3 (flatten-core
+        unit tests) and 4 (CLI coverage) do not apply; 14 tests are in
+        src-tauri, not flatten-core. Zoom hotkeys enabled for WSLg/high-DPI;
+        CSS zoom rasterizes (blurry at 150%+); a rem-based font-size setting
+        would stay crisp (deferred). Findings F-54 to F-59 filed on WA-006,
+        EX-001, CLI-001, PLAT-001.
 
     APP-001:
       story: >
@@ -916,7 +925,7 @@ stories:
       acceptance_criteria:
         - "Tauri commands over DA-005 flatten-core binding functions: create, edit, activate, deactivate, delete"
         - "Binding creation prompts for every required ARG of the chosen recipe"
-        - "Tauri managed state holds the DB handle (writer channel plus reader pool); commands never hold a Connection across an await"
+        - "Tauri managed state holds the DB handle (writer channel plus per-call read-only connections); commands never hold a Connection across an await"
         - "Errors are a flatten-core thiserror enum, serialized to the frontend as structured JSON"
       verification:
         - "Tauri dev: create a binding on shipped-default; the prompt asks for repo; the resulting row matches flatten binding ls --json"
@@ -1178,3 +1187,9 @@ stories:
         - "Tray, start-at-login, and notification verified per OS"
       verification:
         - "CI green on all three platforms"
+      notes: >
+        F-59: CI currently runs no clippy for any crate and does not build
+        src-tauri. Step 1 (free): add cargo clippy -p flatten-core
+        -p flatten-cli -- -D warnings. Step 2 (needs system deps): add
+        webkit2gtk-4.1, appindicator3, rsvg2, patchelf on the Ubuntu runner
+        and include flatten-pm in both clippy and test.

@@ -157,7 +157,7 @@ Commit by logical checkpoint, not by session or file count.
 
 **Ingest work:** `docs/design/2_INGEST.md` (repos, trie, ingest rules), `crates/flatten-core/src/`.
 
-**Frontend work:** `src/`, `src-tauri/tauri.conf.json` for capability permissions.
+**Frontend work:** `src/`, `src-tauri/tauri.conf.json` for capability permissions. `src/lib/tauri.ts` is the typed IPC contract (invoke wrappers); `src/lib/types.ts` has the shared types (`Setting`, `QueryResult`, `CommandError`, `isCommandError`). Read these first when adding new Tauri commands.
 
 **Tauri integration:** `src-tauri/src/lib.rs`, `src-tauri/Cargo.toml` for command registration.
 

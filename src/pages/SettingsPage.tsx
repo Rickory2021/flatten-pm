@@ -154,6 +154,11 @@ export function SettingsPage() {
               className="block text-sm font-medium text-text"
             >
               {row.key}
+              {TYPE_HINTS[row.key] && (
+                <span className="ml-2 font-normal text-xs text-text-muted">
+                  ({TYPE_HINTS[row.key]})
+                </span>
+              )}
             </label>
             <div className="flex items-center gap-2">
               <input
@@ -162,7 +167,7 @@ export function SettingsPage() {
                 value={row.draft}
                 onChange={(e) => onDraftChange(row.key, e.target.value)}
                 onKeyDown={(e) => onKeyDown(e, row.key)}
-                placeholder={TYPE_HINTS[row.key] ?? ""}
+                placeholder={row.key === "watch_source_dir" ? "/absolute/path/to/directory" : ""}
                 className={cn(
                   "flex-1 rounded border px-3 py-1.5 text-sm bg-surface text-text",
                   "placeholder:text-text-muted",
