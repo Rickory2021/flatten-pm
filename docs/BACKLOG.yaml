@@ -955,13 +955,17 @@ stories:
       stage: s2
       status: backlog
       acceptance_criteria:
-        - "Register source by path; name defaults to directory name; calls IN-001 function"
-        - "Configure ingest rules: add/remove glob patterns; preview match set from dry ingest"
-        - "Config ejection: .gitignore import at registration (one-time); diff-against-current and re-import actions (s2)"
-        - "Each save writes repo_versions via DA-004 and triggers re-ingest"
-        - "Soft delete with confirmation; bindings whose recipes SOURCE the deleted name show error state"
+        - "Registration wizard (in-page, not modal): directory picker, name (defaults to dir name), gitignore import toggle, manual pattern entry, preview, confirm"
+        - "Three repo detail views: accordion tree (VS Code-style collapsible hierarchy with folder counts), flat list (sorted trie paths), graph tree (node-and-edge diagram of trie structure)"
+        - "Configure ingest rules: add/remove glob patterns with contextual actions from accordion/graph (exclude file, extension, folder, custom glob)"
+        - "Gitignore re-import: call import_gitignore, diff against stored patterns, accept or cherry-pick"
+        - "Excluded file detection: unfiltered directory walk in flatten-core; show excluded files grayed out in accordion and graph views on demand [needs new core function]"
+        - "File preview: read file from disk by repo path + trie path; size guard for large/binary files; read-only"
+        - "Each save triggers re-ingest"
+        - "Each save writes repo_versions via DA-004 [DEFERRED: DA-004]"
+        - "Soft delete with confirmation; binding error state [DEFERRED: DA-005]"
       verification:
-        - "Tauri dev: register fixtures/repo-a, add '*.log' pattern, preview drops .log files, save; repo history shows two versions"
+        - "Tauri dev: register fixtures/repo-a, add '*.log' pattern, accordion view drops .log files, toggle excluded view shows them grayed; click a file to preview content"
 
     APP-004:
       story: >
