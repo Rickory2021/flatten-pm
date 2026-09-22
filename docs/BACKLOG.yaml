@@ -953,19 +953,50 @@ stories:
         through the GUI, so that I manage what gets ingested without editing
         config files.
       stage: s2
-      status: backlog
+      status: done-deferred
+      # [DEFERRED: DA-004] repo_versions not written on save (versioning schema not yet built)
+      # [DEFERRED: DA-005] soft delete does not show binding error state (binding CRUD not yet built)
+      # [FINDING] rename not exposed in v1; edit_repo accepts empty names, needs core guard
+      # [FINDING] server-side empty name validation missing; wizard validates client-side only
+      # [FINDING] CI does not run src-tauri tests or cargo clippy --workspace (needs webkit2gtk on runners)
       acceptance_criteria:
         - "Registration wizard (in-page, not modal): directory picker, name (defaults to dir name), gitignore import toggle, manual pattern entry, preview, confirm"
-        - "Three repo detail views: accordion tree (VS Code-style collapsible hierarchy with folder counts), flat list (sorted trie paths), graph tree (node-and-edge diagram of trie structure)"
+        - "Three repo detail views: accordion tree (VS Code-style collapsible hierarchy with folder counts), flat list (sorted trie paths with search), graph tree (node-and-edge SVG diagram with pan/zoom)"
         - "Configure ingest rules: add/remove glob patterns with contextual actions from accordion/graph (exclude file, extension, folder, custom glob)"
-        - "Gitignore re-import: call import_gitignore, diff against stored patterns, accept or cherry-pick"
-        - "Excluded file detection: unfiltered directory walk in flatten-core; show excluded files grayed out in accordion and graph views on demand [needs new core function]"
-        - "File preview: read file from disk by repo path + trie path; size guard for large/binary files; read-only"
+        - "Gitignore re-import: call import_gitignore, diff against stored patterns, add selected (merge, never delete user patterns)"
+        - "Excluded file detection: unfiltered directory walk via walk_paths_filtered(&root, &[]); show excluded files grayed out in accordion and graph views on demand"
+        - "File preview: read file from disk by repo path + trie path; size guard (1MB), binary check, path traversal protection, symlink target display; read-only"
         - "Each save triggers re-ingest"
         - "Each save writes repo_versions via DA-004 [DEFERRED: DA-004]"
-        - "Soft delete with confirmation; binding error state [DEFERRED: DA-005]"
+        - "Soft delete with inline confirmation; binding error state [DEFERRED: DA-005]"
       verification:
         - "Tauri dev: register fixtures/repo-a, add '*.log' pattern, accordion view drops .log files, toggle excluded view shows them grayed; click a file to preview content"
+      notes: >
+        Absorbs IN-005 (excluded file detection). Cross-thread touch accepted:
+        adds walk_paths_filtered, canonical_root, assemble_patterns, get_repo,
+        row_to_raw/raw_to_repo, root_hash_hex to flatten-core. walk_and_hash
+        refactored via for_each_included (shared iterator, behavior preserved).
+        validate_path made pub. 26 Rust tests (14 core, 12 tauri). 10 Tauri
+        commands, 10 frontend invoke wrappers, 10 React components.
+        DoD criteria 3/4 (flatten-core unit tests, CLI coverage) scoped to
+        GUI-only under criterion 8. Rename deferred to v2 (needs empty-name
+        guard in core, triggers full reingest). APP-003B filed for UX polish.
+
+    APP-003B:
+      story: >
+        As a developer, the Repos page feels polished and intuitive,
+        so that registration, pattern editing, and file browsing are
+        efficient day-to-day workflows.
+      stage: s1
+      status: backlog
+      acceptance_criteria:
+        - "TBD: populate after UX review session"
+      notes: >
+        Placeholder for UX polish on the APP-003 Repos page.
+        Covers spacing, layout, responsiveness, empty states,
+        loading feedback, wizard flow, tree views, file preview,
+        graph tree usability, and pattern editor ergonomics.
+        Fill ACs after a hands-on review.
 
     APP-004:
       story: >
