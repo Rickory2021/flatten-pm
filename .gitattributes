@@ -1,0 +1,5 @@
+# .gitattributes
+#
+# Recipe text is embedded with include_str! and stored verbatim, so keep it
+# LF on every platform (core.autocrlf on Windows would otherwise embed CRLF).
+*.recipe text eol=lf

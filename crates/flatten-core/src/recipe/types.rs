@@ -54,6 +54,8 @@ pub struct Arg {
 pub enum Instruction {
     /// A `SOURCE <repo>:` block with its COPY blocks.
     Source(SourceInstruction),
+    /// A `RUN <transform>` directory transform.
+    Run(RunInstruction),
 }
 
 /// A `SOURCE <repo>:` block.
@@ -76,6 +78,37 @@ pub struct CopyBlock {
     pub dest: String,
     /// The `AS` key after substitution; unique across the recipe.
     pub key: String,
+    /// The per-file transform chain: the recipe's COPY_DEFAULT_WITH in effect
+    /// at this COPY (empty when none has been declared).
+    pub forward_chain: Vec<TransformRef>,
     /// Where the COPY line starts.
+    pub position: Position,
+}
+
+/// A transform at a resolved version, with its arguments.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TransformRef {
+    /// The transform name.
+    pub name: String,
+    /// `transforms.id`.
+    pub transform_id: i64,
+    /// `transform_versions.id` of the resolved version.
+    pub version_id: i64,
+    /// The resolved version number (pinned or current).
+    pub version: u32,
+    /// Flags as given, after substitution. A bare `--flag` is `"true"`.
+    /// Defaults from the transform's arg schema are not applied yet
+    /// ([DEFERRED: EX-002B]).
+    pub args: std::collections::BTreeMap<String, String>,
+}
+
+/// A `RUN <transform>[@N] [--flag value ...] [--only <glob> ...]` line.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RunInstruction {
+    /// The directory transform at its resolved version.
+    pub transform: TransformRef,
+    /// The `--only` globs after substitution; empty means everything.
+    pub scope: Vec<String>,
+    /// Where the RUN line starts.
     pub position: Position,
 }

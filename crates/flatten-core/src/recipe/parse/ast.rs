@@ -23,12 +23,44 @@ pub(crate) enum Item {
         default: Option<Word>,
         pos: Position,
     },
+    /// `COPY_DEFAULT_WITH <chain>`.
+    CopyDefaultWith {
+        chain: Vec<ChainElem>,
+        pos: Position,
+    },
     /// `SOURCE <repo>:` with its COPY blocks.
     Source {
         repo: Word,
         copies: Vec<CopyAst>,
         pos: Position,
     },
+    /// `RUN <transform>[@N] [flags] [--only <glob> ...]`.
+    Run {
+        name: String,
+        pin: Option<u32>,
+        flags: Vec<Flag>,
+        only: Vec<Word>,
+        pos: Position,
+    },
+}
+
+/// One element of a transform chain: `name --flag value ...`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ChainElem {
+    pub name: String,
+    pub flags: Vec<Flag>,
+    /// Position of the transform name.
+    pub pos: Position,
+}
+
+/// A `--name value` flag. A bare `--name` has the value `true`.
+// SPEC-DEVIATION(EX-001): the spec's Flag also has `pos`. Nothing reads it
+// (errors point at the element or the value word, which has its own pos),
+// so it is left out per plan rule 1.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Flag {
+    pub name: String,
+    pub value: Word,
 }
 
 /// `COPY <src> <dest> AS <key>` inside a SOURCE.
