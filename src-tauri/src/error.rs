@@ -37,6 +37,30 @@ impl From<rusqlite::Error> for CommandError {
     }
 }
 
+impl From<flatten_core::ingest::error::Error> for CommandError {
+    fn from(e: flatten_core::ingest::error::Error) -> Self {
+        use flatten_core::ingest::error::Error as IE;
+        match &e {
+            IE::NonExistentPath { .. }
+            | IE::DuplicateName { .. }
+            | IE::RepoNotFound(_)
+            | IE::InvalidPattern { .. }
+            | IE::InvalidLineEndingPolicy { .. } => CommandError {
+                error: e.to_string(),
+                kind: "domain",
+            },
+            IE::Io { .. } => CommandError {
+                error: e.to_string(),
+                kind: "io",
+            },
+            IE::Json(_) | IE::Trie(_) | IE::Database(_) => CommandError {
+                error: e.to_string(),
+                kind: "database",
+            },
+        }
+    }
+}
+
 impl CommandError {
     /// Create a domain error (bad input, unknown key, validation failure).
     pub fn domain(msg: impl Into<String>) -> Self {

@@ -4,4 +4,5 @@
 // registered in lib.rs via generate_handler!.
 
 pub mod db;
+pub mod repo;
 pub mod settings;

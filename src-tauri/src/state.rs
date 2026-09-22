@@ -1,7 +1,8 @@
 // src-tauri/src/state.rs
 //
 // Application state shared across Tauri commands. Holds the database
-// Writer and the path for opening per-call reader connections.
+// Writer, the db path for per-call readers, and the data directory
+// path for trie file access.
 
 use std::path::PathBuf;
 
@@ -28,6 +29,9 @@ pub struct AppState {
     /// Database file path. Used by reader commands to open per-call
     /// read-only connections via `open_reader()`.
     pub db_path: PathBuf,
+    /// Application data directory (`{platform_data_dir}/flatten-pm`).
+    /// Used by repo commands to locate trie files (`{data_dir}/tries/`).
+    pub data_dir: PathBuf,
 }
 
 /// Initialize application state: create the data directory, open and
@@ -51,5 +55,9 @@ pub fn init_app_state() -> Result<AppState, String> {
     let writer = Writer::open(&db_path)
         .map_err(|e| format!("failed to open database: {e}"))?;
 
-    Ok(AppState { writer, db_path })
+    Ok(AppState {
+        writer,
+        db_path,
+        data_dir,
+    })
 }

@@ -29,12 +29,23 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             commands::settings::settings_list,
             commands::settings::settings_set,
             commands::db::db_tables,
             commands::db::db_query,
+            commands::repo::repo_list,
+            commands::repo::repo_add,
+            commands::repo::repo_tree,
+            commands::repo::repo_edit,
+            commands::repo::repo_reingest,
+            commands::repo::repo_delete,
+            commands::repo::repo_excluded_files,
+            commands::repo::repo_preview,
+            commands::repo::repo_read_file,
+            commands::repo::repo_gitignore_patterns,
         ])
         .run(tauri::generate_context!());
 
