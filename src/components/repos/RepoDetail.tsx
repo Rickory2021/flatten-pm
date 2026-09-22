@@ -1,8 +1,8 @@
 // src/components/repos/RepoDetail.tsx
 //
 // Repo detail view: header, view mode toggle (accordion/flat/graph),
-// action bar, pattern editing, file preview, excluded toggle, delete.
-// Contextual patterns + gitignore diff wired in chunk 7c.
+// action bar, pattern editing with contextual suggestions, file preview,
+// excluded toggle, gitignore re-import diff, delete with inline confirm.
 
 import { useEffect, useState, useCallback } from "react";
 import {
@@ -15,6 +15,7 @@ import {
   Loader2,
   Eye,
   EyeOff,
+  FileDown,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -33,6 +34,7 @@ import { FlatList } from "@/components/repos/FlatList";
 import { GraphTree } from "@/components/repos/GraphTree";
 import { FilePreview } from "@/components/repos/FilePreview";
 import { PatternEditor } from "@/components/repos/PatternEditor";
+import { GitignoreDiff } from "@/components/repos/GitignoreDiff";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -41,7 +43,6 @@ import { PatternEditor } from "@/components/repos/PatternEditor";
 interface RepoDetailProps {
   repoId: number;
   onBack: () => void;
-  /** Called after delete so the parent can increment listKey. */
   onDeleted: () => void;
 }
 
@@ -78,6 +79,9 @@ export function RepoDetail({ repoId, onBack, onDeleted }: RepoDetailProps) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
 
+  // Gitignore diff
+  const [showGitignoreDiff, setShowGitignoreDiff] = useState(false);
+
   // Re-ingest
   const [reingesting, setReingesting] = useState(false);
 
@@ -85,10 +89,8 @@ export function RepoDetail({ repoId, onBack, onDeleted }: RepoDetailProps) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  // Selected node (consumed by contextual patterns in chunk 7c)
+  // Selected node for contextual pattern suggestions
   const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
-  // Suppress unused warning; selectedNode is read in chunk 7c
-  void selectedNode;
 
   // --- Fetch data ---
 
@@ -155,12 +157,14 @@ export function RepoDetail({ repoId, onBack, onDeleted }: RepoDetailProps) {
     if (!repo) return;
     setDraftPatterns([...repo.ingest_patterns]);
     setEditingPatterns(true);
+    setShowGitignoreDiff(false);
     setSaveError("");
   };
 
   const cancelEditing = () => {
     setEditingPatterns(false);
     setSaveError("");
+    setSelectedNode(null);
   };
 
   const savePatterns = async () => {
@@ -170,11 +174,19 @@ export function RepoDetail({ repoId, onBack, onDeleted }: RepoDetailProps) {
       await repoEdit(repoId, undefined, draftPatterns, undefined);
       setSaving(false);
       setEditingPatterns(false);
+      setSelectedNode(null);
       await fetchData();
     } catch (e: unknown) {
       setSaveError(isCommandError(e) ? e.error : "Save failed.");
       setSaving(false);
     }
+  };
+
+  // --- Gitignore diff ---
+
+  const handleGitignoreApplied = async () => {
+    setShowGitignoreDiff(false);
+    await fetchData();
   };
 
   // --- Re-ingest ---
@@ -369,6 +381,20 @@ export function RepoDetail({ repoId, onBack, onDeleted }: RepoDetailProps) {
           </button>
         )}
 
+        {/* Re-import .gitignore */}
+        {!showGitignoreDiff && !editingPatterns && (
+          <button
+            onClick={() => setShowGitignoreDiff(true)}
+            className={cn(
+              "inline-flex items-center gap-1 rounded px-2.5 py-1 text-xs",
+              "border border-border text-text-muted hover:text-text hover:border-accent",
+            )}
+          >
+            <FileDown className="h-3 w-3" />
+            Re-import .gitignore
+          </button>
+        )}
+
         {/* Spacer */}
         <div className="flex-1" />
 
@@ -407,12 +433,26 @@ export function RepoDetail({ repoId, onBack, onDeleted }: RepoDetailProps) {
         )}
       </div>
 
+      {/* Gitignore diff (when shown) */}
+      {showGitignoreDiff && (
+        <div className="mb-4">
+          <GitignoreDiff
+            repoId={repoId}
+            repoPath={repo.path}
+            storedPatterns={repo.ingest_patterns}
+            onClose={() => setShowGitignoreDiff(false)}
+            onApplied={handleGitignoreApplied}
+          />
+        </div>
+      )}
+
       {/* Pattern editor (when editing) */}
       {editingPatterns && (
         <div className="mb-4 p-4 rounded border border-border bg-surface">
           <PatternEditor
             patterns={draftPatterns}
             onChange={setDraftPatterns}
+            selectedNode={selectedNode}
           />
           {saveError && (
             <p className="text-xs text-danger mt-2">{saveError}</p>
