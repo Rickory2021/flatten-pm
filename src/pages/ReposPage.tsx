@@ -6,6 +6,8 @@
 import { useState } from "react";
 import { FolderGit2 } from "lucide-react";
 import { RepoList } from "@/components/repos/RepoList";
+import { RepoWizard } from "@/components/repos/RepoWizard";
+import { RepoDetail } from "@/components/repos/RepoDetail";
 
 // ---------------------------------------------------------------------------
 // Page view state
@@ -22,6 +24,10 @@ type PageView =
 
 export function ReposPage() {
   const [view, setView] = useState<PageView>({ kind: "list" });
+  // Incrementing key forces RepoList to remount and refetch after mutations
+  // (registration, delete). Without this, React reuses the component and
+  // the stale list persists.
+  const [listKey, setListKey] = useState(0);
 
   return (
     <div className="p-6">
@@ -36,35 +42,28 @@ export function ReposPage() {
       <div className="mt-6">
         {view.kind === "list" && (
           <RepoList
+            key={listKey}
             onAdd={() => setView({ kind: "wizard" })}
             onSelect={(repoId) => setView({ kind: "detail", repoId })}
           />
         )}
 
         {view.kind === "wizard" && (
-          <div className="text-text-muted text-sm">
-            {/* Stub, replaced in chunk 5 */}
-            <p>Registration wizard placeholder.</p>
-            <button
-              onClick={() => setView({ kind: "list" })}
-              className="mt-2 text-accent hover:underline text-sm"
-            >
-              Back to list
-            </button>
-          </div>
+          <RepoWizard
+            onCancel={() => setView({ kind: "list" })}
+            onComplete={(repoId) => {
+              setListKey((k) => k + 1);
+              setView({ kind: "detail", repoId });
+            }}
+          />
         )}
 
         {view.kind === "detail" && (
-          <div className="text-text-muted text-sm">
-            {/* Stub, replaced in chunk 6 */}
-            <p>Detail view placeholder for repo {view.repoId}.</p>
-            <button
-              onClick={() => setView({ kind: "list" })}
-              className="mt-2 text-accent hover:underline text-sm"
-            >
-              Back to list
-            </button>
-          </div>
+          <RepoDetail
+            repoId={view.repoId}
+            onBack={() => setView({ kind: "list" })}
+            onDeleted={() => setListKey((k) => k + 1)}
+          />
         )}
       </div>
     </div>
