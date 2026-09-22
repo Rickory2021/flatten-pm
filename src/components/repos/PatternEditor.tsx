@@ -1,12 +1,13 @@
 // src/components/repos/PatternEditor.tsx
 //
 // Pattern editor: displays a list of glob patterns with add/remove.
-// Used in the wizard (step 3) and detail view. Contextual suggestions
-// from tree selection are added in chunk 7c.
+// When a selectedNode is provided, shows contextual action suggestions
+// (exclude file, extension, folder; include with negation).
 
 import { useState } from "react";
-import { Plus, X } from "lucide-react";
+import { Plus, X, Crosshair } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { TreeNode } from "@/lib/tree";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -19,6 +20,22 @@ export interface PatternEditorProps {
   onChange: (patterns: string[]) => void;
   /** Label shown above the pattern list. */
   label?: string;
+  /** When provided, shows contextual action suggestions. */
+  selectedNode?: TreeNode | null;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Extract file extension from a path. Returns null if none. */
+function getExtension(path: string): string | null {
+  const dot = path.lastIndexOf(".");
+  if (dot <= 0 || dot === path.length - 1) return null;
+  const name = path.split("/").pop() ?? path;
+  const nameDot = name.lastIndexOf(".");
+  if (nameDot <= 0) return null;
+  return name.substring(nameDot + 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -29,19 +46,19 @@ export function PatternEditor({
   patterns,
   onChange,
   label = "Ingest patterns",
+  selectedNode,
 }: PatternEditorProps) {
   const [draft, setDraft] = useState("");
 
-  const addPattern = () => {
-    const trimmed = draft.trim();
-    if (!trimmed) return;
-    // Avoid duplicates
-    if (patterns.includes(trimmed)) {
-      setDraft("");
+  const addPattern = (pattern?: string) => {
+    const toAdd = pattern ?? draft.trim();
+    if (!toAdd) return;
+    if (patterns.includes(toAdd)) {
+      if (!pattern) setDraft("");
       return;
     }
-    onChange([...patterns, trimmed]);
-    setDraft("");
+    onChange([...patterns, toAdd]);
+    if (!pattern) setDraft("");
   };
 
   const removePattern = (index: number) => {
@@ -55,9 +72,84 @@ export function PatternEditor({
     }
   };
 
+  // --- Contextual suggestions ---
+
+  const suggestions: { label: string; pattern: string; hint?: string }[] = [];
+
+  if (selectedNode && selectedNode.path) {
+    const node = selectedNode;
+    const ext = node.kind === "file" ? getExtension(node.path) : null;
+
+    if (!node.excluded) {
+      // Exclude suggestions
+      if (node.kind === "file") {
+        // Exclude by extension (unanchored, global)
+        if (ext) {
+          suggestions.push({
+            label: `Exclude *.${ext}`,
+            pattern: `*.${ext}`,
+          });
+        }
+        // Exclude this specific file (anchored)
+        suggestions.push({
+          label: "Exclude this file",
+          pattern: `/${node.path}`,
+        });
+      } else if (node.kind === "dir") {
+        // Exclude this folder (anchored)
+        suggestions.push({
+          label: "Exclude this folder",
+          pattern: `/${node.path}/`,
+        });
+      }
+    } else {
+      // Include suggestion for excluded nodes (negation)
+      suggestions.push({
+        label: "Include this",
+        pattern: `!/${node.path}`,
+        hint: "Negation cannot re-include files under an excluded directory.",
+      });
+    }
+  }
+
   return (
     <div>
       <p className="text-sm font-medium text-text mb-2">{label}</p>
+
+      {/* Contextual suggestions */}
+      {suggestions.length > 0 && (
+        <div className="mb-3 p-2.5 rounded border border-accent/30 bg-accent/5">
+          <div className="flex items-center gap-1.5 mb-2">
+            <Crosshair className="h-3 w-3 text-accent" />
+            <span className="text-xs font-medium text-accent">
+              {selectedNode?.path}
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {suggestions.map((s) => (
+              <button
+                key={s.pattern}
+                onClick={() => addPattern(s.pattern)}
+                disabled={patterns.includes(s.pattern)}
+                className={cn(
+                  "rounded border px-2 py-1 text-xs font-mono",
+                  patterns.includes(s.pattern)
+                    ? "border-border-muted text-text-muted cursor-not-allowed"
+                    : "border-accent/40 text-accent hover:bg-accent/10",
+                )}
+                title={s.hint ?? `Add pattern: ${s.pattern}`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+          {suggestions.some((s) => s.hint) && (
+            <p className="text-xs text-text-muted mt-1.5 italic">
+              {suggestions.find((s) => s.hint)?.hint}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Pattern list */}
       {patterns.length > 0 && (
@@ -102,7 +194,7 @@ export function PatternEditor({
           )}
         />
         <button
-          onClick={addPattern}
+          onClick={() => addPattern()}
           disabled={!draft.trim()}
           className={cn(
             "inline-flex items-center gap-1 rounded px-3 py-1.5 text-sm font-medium",
