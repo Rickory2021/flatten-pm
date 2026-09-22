@@ -9,7 +9,7 @@ use super::error::{Error, Result};
 
 /// Validate a trie path: relative, forward-slash separated, no `.`/`..`,
 /// no empty segments, no leading/trailing slash.
-pub(crate) fn validate_path(path: &str) -> Result<()> {
+pub fn validate_path(path: &str) -> Result<()> {
     if path.is_empty() {
         return Err(Error::InvalidPath("empty path".into()));
     }

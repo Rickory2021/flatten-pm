@@ -46,21 +46,28 @@ pub(crate) fn build_matcher(root: &Path, patterns: &[String]) -> Result<Gitignor
 }
 
 // ---------------------------------------------------------------------------
-// Walk and hash
+// Shared walk iterator
 // ---------------------------------------------------------------------------
 
-/// Walk a directory with gitignore-style patterns and produce trie leaves.
+/// Walk a directory under the given patterns, calling `f` for each included
+/// file/symlink entry. Returns the total lossy count across ALL entries
+/// (including directories, before the file-type filter).
 ///
-/// Callers must pass a canonicalized root (the `GitignoreBuilder` and
-/// `strip_prefix` must see the same path). `register_repo` canonicalizes;
-/// direct callers should too.
+/// This preserves `walk_and_hash`'s existing counting semantics where
+/// directory names contribute to `lossy_count`. The closure receives
+/// `(absolute_path, trie_path, metadata)` and decides what to do with
+/// each matched entry (hash it, collect its path, etc).
 ///
-/// Returns `(leaves, lossy_count)` where `lossy_count` is the number of
-/// paths where `path_from_os` returned `was_lossy = true`.
-pub fn walk_and_hash(
+/// Both `walk_and_hash` and `walk_paths_filtered` consume this. The shared
+/// implementation guarantees identical filtering behavior.
+fn for_each_included<F>(
     root: &Path,
     patterns: &[String],
-) -> Result<(Vec<(String, trie::LeafNode)>, usize)> {
+    mut f: F,
+) -> Result<usize>
+where
+    F: FnMut(&Path, String, std::fs::Metadata) -> Result<()>,
+{
     if !root.is_dir() {
         return Err(Error::NonExistentPath {
             path: root.display().to_string(),
@@ -68,7 +75,6 @@ pub fn walk_and_hash(
     }
 
     let matcher = build_matcher(root, patterns)?;
-    let mut leaves = Vec::new();
     let mut lossy_count = 0usize;
 
     let walker = ignore::WalkBuilder::new(root)
@@ -107,23 +113,54 @@ pub fn walk_and_hash(
             source: e,
         })?;
 
+        // Only files and symlinks go to the closure.
+        // Directories, FIFOs, sockets, devices: silently skipped.
+        // But lossy_count above counts all entries (including dirs).
+        if metadata.is_file() || metadata.file_type().is_symlink() {
+            f(entry.path(), trie_path, metadata)?;
+        }
+    }
+
+    Ok(lossy_count)
+}
+
+// ---------------------------------------------------------------------------
+// Walk and hash
+// ---------------------------------------------------------------------------
+
+/// Walk a directory with gitignore-style patterns and produce trie leaves.
+///
+/// Callers must pass a canonicalized root (the `GitignoreBuilder` and
+/// `strip_prefix` must see the same path). `register_repo` canonicalizes;
+/// direct callers should too.
+///
+/// Returns `(leaves, lossy_count)` where `lossy_count` is the number of
+/// entries (including directories) where `path_from_os` returned
+/// `was_lossy = true`.
+pub fn walk_and_hash(
+    root: &Path,
+    patterns: &[String],
+) -> Result<(Vec<(String, trie::LeafNode)>, usize)> {
+    let mut leaves = Vec::new();
+
+    let lossy_count = for_each_included(root, patterns, |abs_path, trie_path, metadata| {
         if metadata.file_type().is_symlink() {
-            let target = std::fs::read_link(entry.path()).map_err(|e| Error::Io {
-                context: format!("readlink: {}", entry.path().display()),
+            let target = std::fs::read_link(abs_path).map_err(|e| Error::Io {
+                context: format!("readlink: {}", abs_path.display()),
                 source: e,
             })?;
 
             #[cfg(unix)]
             let target_bytes = {
                 use std::os::unix::ffi::OsStrExt;
-                target.as_os_str().as_bytes()
+                target.as_os_str().as_bytes().to_vec()
             };
             #[cfg(not(unix))]
             let target_lossy = target.to_string_lossy();
             #[cfg(not(unix))]
-            let target_bytes = target_lossy.as_bytes();
+            let target_bytes = target_lossy.as_bytes().to_vec();
 
-            let content_hash = blake3::hash(target_bytes);
+            let content_hash = blake3::hash(&target_bytes);
             leaves.push((
                 trie_path,
                 trie::LeafNode {
@@ -134,13 +171,13 @@ pub fn walk_and_hash(
             ));
         } else if metadata.is_file() {
             // Stream through hasher; no whole-file read (avoids OOM on large files).
-            let mut file = std::fs::File::open(entry.path()).map_err(|e| Error::Io {
-                context: format!("open: {}", entry.path().display()),
+            let mut file = std::fs::File::open(abs_path).map_err(|e| Error::Io {
+                context: format!("open: {}", abs_path.display()),
                 source: e,
             })?;
             let mut hasher = blake3::Hasher::new();
             let size = std::io::copy(&mut file, &mut hasher).map_err(|e| Error::Io {
-                context: format!("hash: {}", entry.path().display()),
+                context: format!("hash: {}", abs_path.display()),
                 source: e,
             })?;
             leaves.push((
@@ -152,12 +189,34 @@ pub fn walk_and_hash(
                 },
             ));
         }
-        // Directories, FIFOs, sockets, devices: silently skipped.
-        // FIFOs/sockets would block on io::copy. Devices: unbounded reads.
-        // Trie builds directory nodes from leaves; no explicit dir entries needed.
-    }
+        // for_each_included already filters to files and symlinks, so the
+        // else branch here is unreachable. Kept as defensive no-op.
+        Ok(())
+    })?;
 
     Ok((leaves, lossy_count))
+}
+
+// ---------------------------------------------------------------------------
+// Walk paths (filtered, no hashing)
+// ---------------------------------------------------------------------------
+
+/// Walk a directory with patterns applied, returning matched file paths
+/// without hashing. Cheaper than `walk_and_hash` for preview purposes.
+///
+/// Uses `for_each_included` to guarantee identical filtering behavior.
+///
+/// Callers must pass a canonicalized root (same requirement as `walk_and_hash`).
+///
+/// With an empty pattern list, returns all files except `.git` (equivalent
+/// to an unfiltered walk; `build_matcher` with `&[]` adds only `.git`).
+pub fn walk_paths_filtered(root: &Path, patterns: &[String]) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    let _lossy_count = for_each_included(root, patterns, |_abs, trie_path, _meta| {
+        paths.push(trie_path);
+        Ok(())
+    })?;
+    Ok(paths)
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +694,99 @@ mod tests {
         );
     }
 
+    // --- walk_paths_filtered tests ---
+
+    #[test]
+    fn walk_filtered_empty_patterns_includes_all() {
+        let dir = test_dir_with_files(&[
+            ("a.txt", "hello"),
+            ("sub/b.rs", "fn main() {}"),
+            (".git/config", "[core]"),
+        ]);
+        let paths = walk_paths_filtered(dir.path(), &[]).expect("walk should succeed");
+
+        assert!(paths.contains(&"a.txt".to_string()), "a.txt included");
+        assert!(paths.contains(&"sub/b.rs".to_string()), "sub/b.rs included");
+        assert!(
+            !paths.iter().any(|p| p.starts_with(".git")),
+            ".git excluded"
+        );
+    }
+
+    #[test]
+    fn walk_filtered_skips_git() {
+        let dir = test_dir_with_files(&[
+            ("a.txt", "hello"),
+            (".git/HEAD", "ref: refs/heads/main"),
+        ]);
+        let paths = walk_paths_filtered(dir.path(), &[]).expect("walk should succeed");
+
+        assert!(paths.contains(&"a.txt".to_string()), "a.txt included");
+        assert!(
+            !paths.iter().any(|p| p.starts_with(".git")),
+            ".git excluded with empty patterns"
+        );
+    }
+
+    #[test]
+    fn walk_filtered_empty_dir() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let paths = walk_paths_filtered(dir.path(), &[]).expect("walk should succeed");
+        assert!(paths.is_empty(), "empty dir returns empty vec");
+    }
+
+    #[test]
+    fn walk_filtered_nonexistent() {
+        let result = walk_paths_filtered(Path::new("/nonexistent/path/abc"), &[]);
+        assert!(
+            matches!(result, Err(Error::NonExistentPath { .. })),
+            "nonexistent path returns NonExistentPath"
+        );
+    }
+
+    #[test]
+    fn walk_filtered_matches_walk_and_hash() {
+        // Fixture includes nested excluded dir to ensure both walks agree
+        // on directory-level cuts. Symlink tested on unix only (separate test).
+        let dir = test_dir_with_files(&[
+            ("src/main.rs", "fn main() {}"),
+            ("src/lib.rs", "pub fn lib() {}"),
+            ("node_modules/foo.js", "module.exports = {}"),
+            ("node_modules/bar/baz.js", "nested"),
+            ("build/output.o", "binary"),
+            ("README.md", "# readme"),
+        ]);
+        let patterns = vec!["node_modules/".to_string(), "*.o".to_string()];
+
+        let (leaves, _) = walk_and_hash(dir.path(), &patterns).expect("walk_and_hash");
+        let mut hash_paths: Vec<String> = leaves.into_iter().map(|(p, _)| p).collect();
+        hash_paths.sort();
+
+        let mut filtered_paths = walk_paths_filtered(dir.path(), &patterns)
+            .expect("walk_paths_filtered");
+        filtered_paths.sort();
+
+        assert_eq!(
+            hash_paths, filtered_paths,
+            "walk_paths_filtered must return exactly the same paths as walk_and_hash"
+        );
+    }
+
+    #[test]
+    fn walk_filtered_respects_patterns() {
+        let dir = test_dir_with_files(&[
+            ("a.txt", "hello"),
+            ("b.log", "log entry"),
+            ("sub/c.log", "nested log"),
+        ]);
+        let patterns = vec!["*.log".to_string()];
+        let paths = walk_paths_filtered(dir.path(), &patterns).expect("walk should succeed");
+
+        assert!(paths.contains(&"a.txt".to_string()), "a.txt included");
+        assert!(!paths.contains(&"b.log".to_string()), "b.log excluded");
+        assert!(!paths.contains(&"sub/c.log".to_string()), "sub/c.log excluded");
+    }
+
     // --- Import tests ---
 
     #[test]
@@ -772,7 +924,7 @@ mod tests {
         ]);
 
         let patterns = import_gitignore(dir.path()).expect("import failed");
-        // Should produce sub/**/build/ (unanchored → **)
+        // Should produce sub/**/build/ (unanchored -> **)
         assert_eq!(patterns, vec!["sub/**/build/"]);
 
         let paths = walk_paths(dir.path(), &patterns);

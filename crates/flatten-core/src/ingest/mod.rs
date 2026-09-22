@@ -6,7 +6,7 @@
 pub mod error;
 mod patterns;
 
-pub use patterns::{import_gitignore, walk_and_hash};
+pub use patterns::{import_gitignore, walk_and_hash, walk_paths_filtered};
 
 #[cfg(test)]
 mod test_util;
@@ -34,6 +34,13 @@ pub struct IngestReport {
     /// Files matching extraction patterns (committed enrichments).
     /// Always 0 until extraction patterns exist (EX-006).
     pub enrichment_count: usize,
+}
+
+impl IngestReport {
+    /// Format `root_hash` as a lowercase hex string (64 characters).
+    pub fn root_hash_hex(&self) -> String {
+        self.root_hash.iter().map(|b| format!("{b:02x}")).collect()
+    }
 }
 
 /// A `repos` table row, returned by list/get operations.
@@ -100,18 +107,94 @@ fn update_trie_timestamp(writer: &db::writer::Writer, repo_id: i64) -> Result<()
     Ok(())
 }
 
+/// Raw column tuple from the repos table. The JSON parse happens outside
+/// the rusqlite callback to preserve the `Error::Json` variant on corrupt
+/// `ingest_patterns`.
+type RawRepoRow = (i64, String, String, String, String, Option<String>, String, Option<String>);
+
+/// Extract a `RawRepoRow` from a rusqlite `Row`.
+/// Used inside `query_row`/`query_map` callbacks.
+fn row_to_raw(row: &rusqlite::Row) -> rusqlite::Result<RawRepoRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+    ))
+}
+
+/// Convert a `RawRepoRow` to `RepoRow`. Parses `ingest_patterns` JSON.
+/// Returns `Error::Json` on corrupt JSON (not `Error::Database`).
+fn raw_to_repo(raw: RawRepoRow) -> Result<RepoRow> {
+    let (id, path, name, patterns_json, policy, trie_ts, created, deleted) = raw;
+    let patterns: Vec<String> = serde_json::from_str(&patterns_json)?;
+    Ok(RepoRow {
+        id,
+        path,
+        name,
+        ingest_patterns: patterns,
+        line_ending_policy: policy,
+        trie_updated_at: trie_ts,
+        created_at: created,
+        deleted_at: deleted,
+    })
+}
+
 // ---------------------------------------------------------------------------
-// Public API — registration and ingest
+// Public API -- path and pattern helpers
+// ---------------------------------------------------------------------------
+
+/// Canonicalize a repo root path. Returns `NonExistentPath` if the path
+/// doesn't exist or isn't a directory.
+pub fn canonical_root(root: &Path) -> Result<PathBuf> {
+    let canonical = std::fs::canonicalize(root).map_err(|_| Error::NonExistentPath {
+        path: root.display().to_string(),
+    })?;
+    if !canonical.is_dir() {
+        return Err(Error::NonExistentPath {
+            path: root.display().to_string(),
+        });
+    }
+    Ok(canonical)
+}
+
+/// Assemble the final pattern list from explicit patterns and optional
+/// `.gitignore` import. Merge order: imported first, explicit after.
+///
+/// Takes an already-canonicalized root (from `canonical_root`). This split
+/// preserves `register_repo`'s error ordering: canonicalize at step 1,
+/// cheap checks (UTF-8, policy, name uniqueness) at steps 2-4, pattern
+/// assembly at step 5.
+pub fn assemble_patterns(
+    canonical_root: &Path,
+    explicit_patterns: &[String],
+    import_gitignore: bool,
+) -> Result<Vec<String>> {
+    let mut final_patterns = if import_gitignore {
+        patterns::import_gitignore(canonical_root)?
+    } else {
+        Vec::new()
+    };
+    final_patterns.extend(explicit_patterns.iter().cloned());
+    Ok(final_patterns)
+}
+
+// ---------------------------------------------------------------------------
+// Public API -- registration and ingest
 // ---------------------------------------------------------------------------
 
 /// Register a new repo.
 ///
 /// Sequence:
-///   1. `canonicalize(path)` -> `NonExistentPath` if fails; `is_dir` check
+///   1. `canonical_root(path)` -> `NonExistentPath` if fails
 ///   2. `path.to_str()` -> `NonExistentPath` if non-UTF-8 (can't store in TEXT)
 ///   3. `validate_line_ending_policy` (cheap local check before DB round-trip)
 ///   4. Pre-check name uniqueness (`SELECT`, no `deleted_at` filter)
-///   5. Optionally `import_gitignore`; merge: imported first, explicit after
+///   5. `assemble_patterns` (optionally `import_gitignore`; merge: imported first, explicit after)
 ///   6. `walk_and_hash` -> `(leaves, lossy_count)` (validates patterns internally)
 ///   7. `Trie::from_leaves` -> trie
 ///   8. Insert `repos` row (UNIQUE is authoritative guard against races)
@@ -124,19 +207,12 @@ pub fn register_repo(
     data_dir: &Path,
     path: &Path,
     name: &str,
-    patterns: &[String],
+    explicit_patterns: &[String],
     line_ending_policy: &str,
-    import_gitignore: bool,
+    import_gitignore_flag: bool,
 ) -> Result<(i64, IngestReport)> {
     // 1. Canonicalize and validate directory
-    let canonical = std::fs::canonicalize(path).map_err(|_| Error::NonExistentPath {
-        path: path.display().to_string(),
-    })?;
-    if !canonical.is_dir() {
-        return Err(Error::NonExistentPath {
-            path: path.display().to_string(),
-        });
-    }
+    let canonical = canonical_root(path)?;
 
     // 2. Ensure path is UTF-8 for TEXT storage
     let path_str = canonical
@@ -165,13 +241,8 @@ pub fn register_repo(
         });
     }
 
-    // 5. Optionally import .gitignore; merge: imported first, explicit after
-    let mut final_patterns = if import_gitignore {
-        patterns::import_gitignore(&canonical)?
-    } else {
-        Vec::new()
-    };
-    final_patterns.extend(patterns.iter().cloned());
+    // 5. Assemble patterns (import first, explicit after)
+    let final_patterns = assemble_patterns(&canonical, explicit_patterns, import_gitignore_flag)?;
 
     // 6. Walk and hash (validates patterns internally via build_matcher)
     let (leaves, lossy_count) = patterns::walk_and_hash(&canonical, &final_patterns)?;
@@ -298,7 +369,7 @@ pub fn load_or_reingest(
 }
 
 // ---------------------------------------------------------------------------
-// Public API — repo CRUD
+// Public API -- repo CRUD
 // ---------------------------------------------------------------------------
 
 /// List all non-deleted repos.
@@ -312,35 +383,13 @@ pub fn list_repos(conn: &rusqlite::Connection) -> Result<Vec<RepoRow>> {
         .map_err(db::error::Error::from)?;
 
     let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, Option<String>>(7)?,
-            ))
-        })
+        .query_map([], row_to_raw)
         .map_err(db::error::Error::from)?;
 
     let mut result = Vec::new();
     for row in rows {
-        let (id, path, name, patterns_json, policy, trie_ts, created, deleted) =
-            row.map_err(db::error::Error::from)?;
-        let patterns: Vec<String> = serde_json::from_str(&patterns_json)?;
-        result.push(RepoRow {
-            id,
-            path,
-            name,
-            ingest_patterns: patterns,
-            line_ending_policy: policy,
-            trie_updated_at: trie_ts,
-            created_at: created,
-            deleted_at: deleted,
-        });
+        let raw = row.map_err(db::error::Error::from)?;
+        result.push(raw_to_repo(raw)?);
     }
     Ok(result)
 }
@@ -349,42 +398,38 @@ pub fn list_repos(conn: &rusqlite::Connection) -> Result<Vec<RepoRow>> {
 pub fn get_repo_by_name(conn: &rusqlite::Connection, name: &str) -> Result<RepoRow> {
     use rusqlite::OptionalExtension;
 
-    let maybe_row = conn
+    let raw = conn
         .query_row(
             "SELECT id, path, name, ingest_patterns, line_ending_policy, \
              trie_updated_at, created_at, deleted_at \
              FROM repos WHERE name = ?1 AND deleted_at IS NULL",
             [name],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                ))
-            },
+            row_to_raw,
         )
         .optional()
-        .map_err(db::error::Error::from)?;
+        .map_err(db::error::Error::from)?
+        .ok_or_else(|| Error::RepoNotFound(name.to_string()))?;
 
-    let (id, path, repo_name, patterns_json, policy, trie_ts, created, deleted) =
-        maybe_row.ok_or_else(|| Error::RepoNotFound(name.to_string()))?;
+    raw_to_repo(raw)
+}
 
-    let patterns: Vec<String> = serde_json::from_str(&patterns_json)?;
-    Ok(RepoRow {
-        id,
-        path,
-        name: repo_name,
-        ingest_patterns: patterns,
-        line_ending_policy: policy,
-        trie_updated_at: trie_ts,
-        created_at: created,
-        deleted_at: deleted,
-    })
+/// Get a repo by ID. Returns `RepoNotFound` if missing or soft-deleted.
+pub fn get_repo(conn: &rusqlite::Connection, repo_id: i64) -> Result<RepoRow> {
+    use rusqlite::OptionalExtension;
+
+    let raw = conn
+        .query_row(
+            "SELECT id, path, name, ingest_patterns, line_ending_policy, \
+             trie_updated_at, created_at, deleted_at \
+             FROM repos WHERE id = ?1 AND deleted_at IS NULL",
+            [repo_id],
+            row_to_raw,
+        )
+        .optional()
+        .map_err(db::error::Error::from)?
+        .ok_or_else(|| Error::RepoNotFound(format!("id {repo_id}")))?;
+
+    raw_to_repo(raw)
 }
 
 /// Soft-delete a repo (set `deleted_at`). Returns `RepoNotFound` if the
@@ -1455,5 +1500,144 @@ mod tests {
             report3.file_count, 2,
             "after *.txt: .gitignore and debug.log (a.txt excluded)"
         );
+    }
+
+    // --- New tests for APP-003 ---
+
+    #[test]
+    fn get_repo_returns_row() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = test_dir_with_files(&[("a.txt", "hello")]);
+        let writer = test_db(data_dir.path());
+
+        let (id, _) = register_repo(
+            &writer,
+            data_dir.path(),
+            repo_dir.path(),
+            "get-id-test",
+            &[],
+            "preserve",
+            false,
+        )
+        .expect("register should succeed");
+
+        let conn = test_reader(data_dir.path());
+        let row = get_repo(&conn, id).expect("get_repo should succeed");
+
+        assert_eq!(row.id, id, "id should match");
+        assert_eq!(row.name, "get-id-test", "name should match");
+        assert_eq!(row.line_ending_policy, "preserve", "policy should match");
+    }
+
+    #[test]
+    fn get_repo_not_found() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let writer = test_db(data_dir.path());
+        // Need to initialize DB even if no repos
+        let _ = writer;
+
+        let conn = test_reader(data_dir.path());
+        let result = get_repo(&conn, 99999);
+
+        assert!(
+            matches!(result, Err(Error::RepoNotFound(_))),
+            "missing ID should return RepoNotFound, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn get_repo_skips_deleted() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = test_dir_with_files(&[("a.txt", "hello")]);
+        let writer = test_db(data_dir.path());
+
+        let (id, _) = register_repo(
+            &writer,
+            data_dir.path(),
+            repo_dir.path(),
+            "del-get-test",
+            &[],
+            "preserve",
+            false,
+        )
+        .expect("register should succeed");
+
+        soft_delete_repo(&writer, id).expect("soft delete should succeed");
+
+        let conn = test_reader(data_dir.path());
+        let result = get_repo(&conn, id);
+
+        assert!(
+            matches!(result, Err(Error::RepoNotFound(_))),
+            "soft-deleted repo should return RepoNotFound, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn assemble_patterns_merge_order() {
+        let dir = test_dir_with_files(&[
+            (".gitignore", "from_git\n"),
+            ("a.txt", "hello"),
+        ]);
+
+        let canonical = canonical_root(dir.path()).expect("canonical_root");
+        let result = assemble_patterns(&canonical, &["explicit".to_string()], true)
+            .expect("assemble should succeed");
+
+        // Imported patterns first, explicit after
+        assert_eq!(result.len(), 2, "should have 2 patterns");
+        assert_eq!(result[0], "from_git", "imported pattern first");
+        assert_eq!(result[1], "explicit", "explicit pattern second");
+    }
+
+    #[test]
+    fn assemble_patterns_no_import() {
+        let dir = test_dir_with_files(&[
+            (".gitignore", "from_git\n"),
+            ("a.txt", "hello"),
+        ]);
+
+        let canonical = canonical_root(dir.path()).expect("canonical_root");
+        let result = assemble_patterns(&canonical, &["only_this".to_string()], false)
+            .expect("assemble should succeed");
+
+        assert_eq!(result, vec!["only_this"], "import=false returns only explicit");
+    }
+
+    #[test]
+    fn canonical_root_nonexistent() {
+        let result = canonical_root(Path::new("/nonexistent/path/abc"));
+        assert!(
+            matches!(result, Err(Error::NonExistentPath { .. })),
+            "nonexistent path returns NonExistentPath, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_root_file_not_dir() {
+        let dir = test_dir_with_files(&[("a.txt", "hello")]);
+        let file_path = dir.path().join("a.txt");
+        let result = canonical_root(&file_path);
+        assert!(
+            matches!(result, Err(Error::NonExistentPath { .. })),
+            "file path returns NonExistentPath, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn root_hash_hex_format() {
+        let report = IngestReport {
+            file_count: 0,
+            root_hash: [0xab; 32],
+            lossy_count: 0,
+            enrichment_count: 0,
+        };
+        let hex = report.root_hash_hex();
+        assert_eq!(hex.len(), 64, "hex string should be 64 chars");
+        assert!(
+            hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "hex string should be lowercase hex, got: {hex}"
+        );
+        assert_eq!(&hex[..4], "abab", "first two bytes should be 'abab'");
     }
 }

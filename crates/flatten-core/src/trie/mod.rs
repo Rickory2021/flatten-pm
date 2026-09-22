@@ -12,9 +12,8 @@ pub mod error;
 mod path;
 mod persist;
 
-pub use path::path_from_os;
+pub use path::{path_from_os, validate_path};
 use error::{Error, Result};
-use path::validate_path;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
