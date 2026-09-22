@@ -6,7 +6,8 @@
 // indentation, `#` comments, blank lines, and `\` continuation. It returns
 // one LogicalLine per instruction, with the first token already lexed and
 // the rest kept as characters that remember their physical positions.
-// `LogicalLine::words` tokenizes that rest in word mode.
+// `LogicalLine::words` tokenizes that rest in word mode; `LogicalLine::chain`
+// tokenizes it in chain mode, where bare `[`, `]`, and `,` are punctuation.
 //
 // A token is a run of segments with no whitespace between them:
 //   bare text, "quoted text" (escapes \" \\ \n \t), and ${NAME} variables.
@@ -38,11 +39,81 @@ impl LogicalLine {
     pub fn words(&self) -> Result<Vec<Token>> {
         let mut out = Vec::new();
         let mut at = 0;
-        while let Some((token, next)) = next_token(&self.rest, at)? {
+        while let Some((token, next)) = next_token(&self.rest, at, Mode::Word)? {
             out.push(token);
             at = next;
         }
         Ok(out)
+    }
+
+    /// Tokenize everything after the first token in chain mode: bare `[`,
+    /// `]`, and `,` are punctuation and end the token before them. Quoted
+    /// text is still literal, so `"]"` is a word.
+    pub fn chain(&self) -> Result<Vec<ChainToken>> {
+        let mut out = Vec::new();
+        let mut at = 0;
+        loop {
+            while self.rest.get(at).is_some_and(|&(c, _)| is_ws(c)) {
+                at += 1;
+            }
+            let Some(&(c, pos)) = self.rest.get(at) else {
+                return Ok(out);
+            };
+            let punct = match c {
+                '[' => Some(ChainToken::Open(pos)),
+                ']' => Some(ChainToken::Close(pos)),
+                ',' => Some(ChainToken::Comma(pos)),
+                _ => None,
+            };
+            if let Some(punct) = punct {
+                out.push(punct);
+                at += 1;
+                continue;
+            }
+            let Some((token, next)) = next_token(&self.rest, at, Mode::Chain)? else {
+                return Ok(out);
+            };
+            out.push(ChainToken::Word(token));
+            at = next;
+        }
+    }
+}
+
+/// A chain-mode token.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ChainToken {
+    /// `[`
+    Open(Position),
+    /// `]`
+    Close(Position),
+    /// `,`
+    Comma(Position),
+    /// Anything else.
+    Word(Token),
+}
+
+impl ChainToken {
+    /// Where the token starts.
+    pub fn pos(&self) -> Position {
+        match self {
+            ChainToken::Open(pos) | ChainToken::Close(pos) | ChainToken::Comma(pos) => *pos,
+            ChainToken::Word(token) => token.pos,
+        }
+    }
+}
+
+/// Which characters end a bare run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Whitespace only.
+    Word,
+    /// Whitespace, `[`, `]`, and `,`.
+    Chain,
+}
+
+impl Mode {
+    fn ends_bare(self, c: char) -> bool {
+        is_ws(c) || (self == Mode::Chain && matches!(c, '[' | ']' | ','))
     }
 }
 
@@ -257,7 +328,7 @@ fn scan_physical(raw: &str, line_no: u32) -> Result<Physical> {
 
 /// Turn joined content into a LogicalLine by lexing its first token.
 fn finish(indent: u32, chars: Chars) -> Result<Option<LogicalLine>> {
-    let Some((first, next)) = next_token(&chars, 0)? else {
+    let Some((first, next)) = next_token(&chars, 0, Mode::Word)? else {
         return Ok(None);
     };
     Ok(Some(LogicalLine {
@@ -268,9 +339,10 @@ fn finish(indent: u32, chars: Chars) -> Result<Option<LogicalLine>> {
     }))
 }
 
-/// Lex the next word-mode token at or after `at`. Returns the token and the
-/// index just past it, or None at end of input.
-fn next_token(chars: &[(char, Position)], at: usize) -> Result<Option<(Token, usize)>> {
+/// Lex the next token at or after `at`. Returns the token and the index
+/// just past it, or None at end of input. `mode` decides which characters
+/// end a bare run.
+fn next_token(chars: &[(char, Position)], at: usize, mode: Mode) -> Result<Option<(Token, usize)>> {
     let mut i = at;
     while chars.get(i).is_some_and(|&(c, _)| is_ws(c)) {
         i += 1;
@@ -282,7 +354,7 @@ fn next_token(chars: &[(char, Position)], at: usize) -> Result<Option<(Token, us
     let mut segments = Vec::new();
     let mut bare = String::new();
     while let Some(&(c, here)) = chars.get(i) {
-        if is_ws(c) {
+        if mode.ends_bare(c) {
             break;
         }
         if c == '"' {
@@ -488,6 +560,15 @@ mod tests {
             "the backslash before the comment continues the line"
         );
         assert_eq!(texts(&words(&ls[0])), vec!["r", ":"], "continued content");
+
+        let ls = lines("# note \\\nARG a\n");
+        assert_eq!(
+            ls.len(),
+            1,
+            "a backslash inside a comment does not continue"
+        );
+        assert_eq!(ls[0].pos, Position::new(2, 1), "the next line stands alone");
+        assert_eq!(texts(&words(&ls[0])), vec!["a"], "its own content only");
     }
 
     /// Test 5: a trailing `\` needs a following content line.
@@ -664,6 +745,33 @@ mod tests {
         );
         assert_eq!(texts(&words(&ls[0])), vec!["a"], "no stray \\r on line 1");
         assert_eq!(texts(&words(&ls[1])), vec!["b"], "no stray \\r on line 2");
+    }
+
+    /// Test 14: chain mode splits bare brackets and commas; quoted text stays literal.
+    #[test]
+    fn chain_mode_splits_brackets_and_commas() {
+        let ls = lines("COPY_DEFAULT_WITH [a,b] \"]\" [x --k=v]");
+        let tokens = ls[0].chain().expect("chain should lex");
+        let shown: Vec<String> = tokens
+            .iter()
+            .map(|t| match t {
+                ChainToken::Open(_) => "[".to_string(),
+                ChainToken::Close(_) => "]".to_string(),
+                ChainToken::Comma(_) => ",".to_string(),
+                ChainToken::Word(w) => w.display(),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            vec!["[", "a", ",", "b", "]", "\"]\"", "[", "x", "--k=v", "]"],
+            "chain tokens"
+        );
+        assert_eq!(tokens[2].pos(), Position::new(1, 21), "comma position");
+        assert_eq!(
+            tokens[5].pos(),
+            Position::new(1, 25),
+            "quoted bracket position"
+        );
     }
 
     /// Test 15: word mode keeps brackets and commas inside tokens.

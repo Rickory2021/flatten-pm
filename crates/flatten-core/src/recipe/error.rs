@@ -10,6 +10,7 @@
 
 use std::fmt;
 
+use super::catalog::TransformScope;
 use super::types::Position;
 
 /// Recipe operation errors.
@@ -140,8 +141,8 @@ pub enum ParseErrorKind {
     /// A known instruction nested under a block that does not allow it.
     #[error("{instr} is not allowed inside {parent}")]
     NotAllowedIn {
-        /// The misplaced instruction.
-        instr: String,
+        /// The misplaced instruction (always a known keyword).
+        instr: &'static str,
         /// The enclosing block.
         parent: &'static str,
     },
@@ -167,6 +168,22 @@ pub enum ParseErrorKind {
         instr: &'static str,
         /// The accepted form.
         expected: &'static str,
+    },
+    /// A repeated member: a flag within one transform, and (from later
+    /// chunks) block members such as a second OVERRIDE_WITH.
+    #[error("duplicate {what}")]
+    Duplicate {
+        /// What repeated, e.g. `flag --format`.
+        what: String,
+    },
+    /// An `@N` version pin on a COPY chain element.
+    #[error("version pins (@N) are only allowed on INVOKE and RUN")]
+    PinNotAllowed,
+    /// A number that does not parse, or is out of range.
+    #[error("invalid {what}: expected a decimal number >= 1")]
+    InvalidNumber {
+        /// Which number, e.g. `version pin`.
+        what: &'static str,
     },
     /// An ARG name outside `[A-Za-z_][A-Za-z0-9_]*`.
     #[error("invalid ARG name {name:?}: expected [A-Za-z_][A-Za-z0-9_]*")]
@@ -213,6 +230,30 @@ pub enum ParseErrorKind {
     /// A SOURCE repo name that is empty after substitution.
     #[error("SOURCE repo name is empty")]
     InvalidRepoName,
+    /// A transform name the catalog does not know.
+    #[error("unknown transform {name}")]
+    UnknownTransform {
+        /// The transform name.
+        name: String,
+    },
+    /// A pinned transform version that does not exist.
+    #[error("transform {name} has no version {version}")]
+    TransformVersionNotFound {
+        /// The transform name.
+        name: String,
+        /// The pinned version.
+        version: u32,
+    },
+    /// A transform used where the other scope is required.
+    #[error("{name} is a {found} transform; a {expected} transform is required here")]
+    WrongScope {
+        /// The transform name.
+        name: String,
+        /// The scope this position requires.
+        expected: TransformScope,
+        /// The transform's scope.
+        found: TransformScope,
+    },
     /// A COPY src or dest that fails path normalization.
     #[error("invalid path {path:?}: {issue}")]
     InvalidPath {

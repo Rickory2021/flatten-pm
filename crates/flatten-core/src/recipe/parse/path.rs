@@ -87,6 +87,28 @@ pub(crate) fn check_key(key: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Transform and recipe names: `[A-Za-z0-9][A-Za-z0-9_.-]*`.
+pub(crate) fn is_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {
+            chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        }
+        _ => false,
+    }
+}
+
+/// Transform flag names (after the `--`): `[a-z0-9][a-z0-9-]*`.
+pub(crate) fn is_flag_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_lowercase() || first.is_ascii_digit() => {
+            chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        }
+        _ => false,
+    }
+}
+
 /// ARG and variable names: `[A-Za-z_][A-Za-z0-9_]*`.
 pub(crate) fn is_arg_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -141,6 +163,7 @@ mod tests {
             ("", PathIssue::Empty),
             ("a\u{0}b", PathIssue::ControlChar),
             ("a\nb", PathIssue::ControlChar),
+            ("a\tb", PathIssue::ControlChar),
             ("a\\b", PathIssue::Backslash),
             ("/abs", PathIssue::Absolute),
             ("C:x", PathIssue::Absolute),

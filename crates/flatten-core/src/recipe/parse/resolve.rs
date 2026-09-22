@@ -17,14 +17,23 @@
 // symbolic `${name}` text, which contains no `/`, `..`, or control
 // characters and is never empty.
 //
-// Implemented so far (plan chunk C1): ARG, SOURCE, COPY.
+// Transform names resolve through the Catalog at save time (D3): an unknown
+// name is an error in both modes. COPY chains need file transforms; RUN
+// needs a directory transform. `--only` globs go to RunInstruction.scope,
+// never into the transform's args.
+//
+// Implemented so far (plan chunk C2): ARG, COPY_DEFAULT_WITH, SOURCE, COPY,
+// RUN.
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::ast::{Ast, CopyAst, Item, Segment, Word};
+use super::ast::{Ast, ChainElem, CopyAst, Flag, Item, Segment, Word};
 use super::path::{canonical_copy_shape, check_key, normalize_rel_path};
+use crate::recipe::catalog::{Catalog, TransformInfo, TransformScope};
 use crate::recipe::error::{Error, Location, ParseErrorKind, Result, parse_err};
-use crate::recipe::types::{Arg, CopyBlock, Instruction, Recipe, SourceInstruction};
+use crate::recipe::types::{
+    Arg, CopyBlock, Instruction, Position, Recipe, RunInstruction, SourceInstruction, TransformRef,
+};
 
 /// ARG values for resolution.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,14 +52,22 @@ pub struct Resolution {
     pub recipe: Recipe,
 }
 
-/// The ARG environment of one recipe.
+/// The ARG environment and default chain of one recipe.
+// SPEC-DEVIATION(EX-001): the spec's frame also holds a `symbolic` flag per
+// value and a `declared` list. Both land with their first readers (the
+// symbolic flag in C3 for EXCLUDE validation, declaration order in C4 for
+// INVOKE binding step 2), per plan rule 2. Until then `recipe.args` carries
+// ARG order and `env` answers membership.
 #[derive(Default)]
 struct Frame {
     env: HashMap<String, String>,
+    /// The COPY_DEFAULT_WITH in effect: empty until declared; a later
+    /// declaration replaces it for the COPY blocks after it.
+    default_chain: Vec<TransformRef>,
 }
 
 /// Resolve a parsed recipe.
-pub(crate) fn resolve(ast: &Ast, input: &ArgInput) -> Result<Recipe> {
+pub(crate) fn resolve(ast: &Ast, input: &ArgInput, catalog: &dyn Catalog) -> Result<Recipe> {
     let mut frame = Frame::default();
     let mut keys: HashMap<String, Location> = HashMap::new();
     let mut recipe = Recipe {
@@ -68,8 +85,11 @@ pub(crate) fn resolve(ast: &Ast, input: &ArgInput) -> Result<Recipe> {
                         ParseErrorKind::DuplicateArg { name: name.clone() },
                     ));
                 }
-                // The default is always evaluated, so an undeclared reference
-                // in it fails in both modes.
+                // SPEC-DEVIATION(EX-001): the default is substituted even when
+                // a bound value overrides it, so an undeclared reference in a
+                // default fails in both modes. That keeps the open-mode
+                // invariant: open mode never rejects what bound mode accepts.
+                // The spec wording follows at reconcile.
                 let default_value = default
                     .as_ref()
                     .map(|word| substitute(word, &frame))
@@ -100,6 +120,28 @@ pub(crate) fn resolve(ast: &Ast, input: &ArgInput) -> Result<Recipe> {
                     required: default.is_none(),
                     position: *pos,
                 });
+            }
+            Item::CopyDefaultWith { chain, .. } => {
+                frame.default_chain = resolve_chain(chain, &frame, catalog)?;
+            }
+            Item::Run {
+                name,
+                pin,
+                flags,
+                only,
+                pos,
+            } => {
+                let info = lookup(catalog, name, *pin, *pos)?;
+                require_scope(&info, TransformScope::Directory, *pos)?;
+                let mut scope = Vec::with_capacity(only.len());
+                for glob in only {
+                    scope.push(substitute(glob, &frame)?);
+                }
+                recipe.instructions.push(Instruction::Run(RunInstruction {
+                    transform: transform_ref(info, flags, &frame)?,
+                    scope,
+                    position: *pos,
+                }));
             }
             Item::Source { repo, copies, pos } => {
                 let repo_name = substitute(repo, &frame)?;
@@ -140,6 +182,11 @@ fn copy_block(
     let (src, dest) = canonical_copy_shape(src, dest);
 
     let key = substitute(&copy.key, frame)?;
+    // SPEC-DEVIATION(EX-001): the spec says open mode checks only the literal
+    // parts of a symbolic key. This checks the full substituted text, which
+    // is equivalent (symbolic `${name}` text is never empty and has no control
+    // characters) and also accepts a fully symbolic key such as `AS ${k}`,
+    // which a literal-parts-only check would wrongly reject as empty.
     if let Err(reason) = check_key(&key) {
         return Err(parse_err(
             copy.key.pos,
@@ -161,7 +208,83 @@ fn copy_block(
         src,
         dest,
         key,
+        forward_chain: frame.default_chain.clone(),
         position: copy.pos,
+    })
+}
+
+/// Resolve a COPY chain: every element must be a file transform.
+fn resolve_chain(
+    chain: &[ChainElem],
+    frame: &Frame,
+    catalog: &dyn Catalog,
+) -> Result<Vec<TransformRef>> {
+    let mut out = Vec::with_capacity(chain.len());
+    for elem in chain {
+        let info = lookup(catalog, &elem.name, None, elem.pos)?;
+        require_scope(&info, TransformScope::File, elem.pos)?;
+        out.push(transform_ref(info, &elem.flags, frame)?);
+    }
+    Ok(out)
+}
+
+/// Look up a transform, current or pinned. An unknown name is
+/// UnknownTransform even when pinned; a known name with a missing version is
+/// TransformVersionNotFound.
+fn lookup(
+    catalog: &dyn Catalog,
+    name: &str,
+    pin: Option<u32>,
+    pos: Position,
+) -> Result<TransformInfo> {
+    let Some(current) = catalog.transform(name, None)? else {
+        return Err(parse_err(
+            pos,
+            ParseErrorKind::UnknownTransform {
+                name: name.to_string(),
+            },
+        ));
+    };
+    let Some(version) = pin else {
+        return Ok(current);
+    };
+    catalog.transform(name, Some(version))?.ok_or_else(|| {
+        parse_err(
+            pos,
+            ParseErrorKind::TransformVersionNotFound {
+                name: name.to_string(),
+                version,
+            },
+        )
+    })
+}
+
+fn require_scope(info: &TransformInfo, expected: TransformScope, pos: Position) -> Result<()> {
+    if info.scope != expected {
+        return Err(parse_err(
+            pos,
+            ParseErrorKind::WrongScope {
+                name: info.name.clone(),
+                expected,
+                found: info.scope,
+            },
+        ));
+    }
+    Ok(())
+}
+
+/// Build a TransformRef with substituted flag values.
+fn transform_ref(info: TransformInfo, flags: &[Flag], frame: &Frame) -> Result<TransformRef> {
+    let mut args = BTreeMap::new();
+    for flag in flags {
+        args.insert(flag.name.clone(), substitute(&flag.value, frame)?);
+    }
+    Ok(TransformRef {
+        name: info.name,
+        transform_id: info.transform_id,
+        version_id: info.version_id,
+        version: info.version,
+        args,
     })
 }
 
@@ -197,8 +320,11 @@ fn substitute(word: &Word, frame: &Frame) -> Result<String> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use crate::recipe::catalog::{MemCatalog, TransformScope};
     use crate::recipe::error::{Error, Location, ParseErrorKind, PathIssue};
-    use crate::recipe::types::{Instruction, Position, Recipe, SourceInstruction};
+    use crate::recipe::types::{
+        Instruction, Position, Recipe, RunInstruction, SourceInstruction, TransformRef,
+    };
     use crate::recipe::{ArgInput, analyze};
 
     fn bound(pairs: &[(&str, &str)]) -> ArgInput {
@@ -211,13 +337,25 @@ mod tests {
     }
 
     fn run(source: &str, input: &ArgInput) -> Recipe {
-        analyze(source, input)
+        run_with(source, input, &MemCatalog::builtins())
+    }
+
+    fn run_with(source: &str, input: &ArgInput, catalog: &MemCatalog) -> Recipe {
+        analyze(source, input, catalog)
             .unwrap_or_else(|e| panic!("{source:?} should resolve, got {e}"))
             .recipe
     }
 
+    fn open_ok(source: &str) -> bool {
+        analyze(source, &ArgInput::Open, &MemCatalog::builtins()).is_ok()
+    }
+
     fn run_err(source: &str, input: &ArgInput) -> Error {
-        match analyze(source, input) {
+        run_err_with(source, input, &MemCatalog::builtins())
+    }
+
+    fn run_err_with(source: &str, input: &ArgInput, catalog: &MemCatalog) -> Error {
+        match analyze(source, input, catalog) {
             Err(e) => e,
             Ok(r) => panic!("{source:?} should fail to resolve, got {r:?}"),
         }
@@ -232,24 +370,76 @@ mod tests {
     }
 
     fn first_source(recipe: &Recipe) -> &SourceInstruction {
-        match recipe.instructions.first() {
-            Some(Instruction::Source(source)) => source,
-            other => panic!("expected a SOURCE instruction first, got {other:?}"),
-        }
+        recipe
+            .instructions
+            .iter()
+            .find_map(|i| match i {
+                Instruction::Source(source) => Some(source),
+                Instruction::Run(_) => None,
+            })
+            .unwrap_or_else(|| panic!("expected a SOURCE instruction in {recipe:?}"))
     }
 
-    /// Test 39 (C1 rows): SOURCE, src, dest, and key all substitute.
+    fn runs(recipe: &Recipe) -> Vec<&RunInstruction> {
+        recipe
+            .instructions
+            .iter()
+            .filter_map(|i| match i {
+                Instruction::Run(run) => Some(run),
+                Instruction::Source(_) => None,
+            })
+            .collect()
+    }
+
+    fn chain_names(chain: &[TransformRef]) -> Vec<&str> {
+        chain.iter().map(|t| t.name.as_str()).collect()
+    }
+
+    /// Test 39 (C1 and C2 rows): every substitutable argument substitutes.
     #[test]
     fn substitutes_in_every_target() {
-        let source =
-            "ARG repo\nARG sub\nSOURCE ${repo}:\n  COPY ${sub}/ ${repo}/${sub}/ AS ${repo}-${sub}";
-        let recipe = run(source, &bound(&[("repo", "repo-a"), ("sub", "lib")]));
+        let source = "ARG repo\nARG sub\nARG set\nARG fmt\n\
+                      COPY_DEFAULT_WITH [enrichment-injection --template-set ${set}]\n\
+                      SOURCE ${repo}:\n  COPY ${sub}/ ${repo}/${sub}/ AS ${repo}-${sub}\n\
+                      RUN pack --format ${fmt} --only ${repo}/** ${sub}/*.rs";
+        let recipe = run(
+            source,
+            &bound(&[
+                ("repo", "repo-a"),
+                ("sub", "lib"),
+                ("set", "vendor"),
+                ("fmt", "xml"),
+            ]),
+        );
         let src = first_source(&recipe);
         assert_eq!(src.repo_name, "repo-a", "SOURCE repo substituted");
         let copy = &src.copies[0];
         assert_eq!(copy.src, "lib/", "COPY src substituted");
         assert_eq!(copy.dest, "repo-a/lib/", "COPY dest substituted");
         assert_eq!(copy.key, "repo-a-lib", "COPY key substituted");
+        assert_eq!(
+            copy.forward_chain[0]
+                .args
+                .get("template-set")
+                .map(String::as_str),
+            Some("vendor"),
+            "chain flag value substituted"
+        );
+        let run = runs(&recipe)[0];
+        assert_eq!(
+            run.transform.args.get("format").map(String::as_str),
+            Some("xml"),
+            "RUN flag value substituted"
+        );
+        assert_eq!(
+            run.scope,
+            vec!["repo-a/**".to_string(), "lib/*.rs".to_string()],
+            "--only globs substituted"
+        );
+        assert!(
+            !run.transform.args.contains_key("only"),
+            "--only never appears in the transform's args"
+        );
     }
 
     /// Test 40: ARG defaults may reference earlier ARGs, and are substituted eagerly.
@@ -437,7 +627,7 @@ mod tests {
         ];
         for (source, value, kind, line, col) in cases {
             assert!(
-                analyze(source, &ArgInput::Open).is_ok(),
+                open_ok(source),
                 "{source:?} is valid in open mode while v is symbolic"
             );
             assert_eq!(
@@ -472,7 +662,7 @@ mod tests {
 
         let two_vars = "ARG a\nARG b\nSOURCE r:\n  COPY x/ x/ AS ${a}\n  COPY y/ y/ AS ${b}";
         assert!(
-            analyze(two_vars, &ArgInput::Open).is_ok(),
+            open_ok(two_vars),
             "different symbolic keys do not collide in open mode"
         );
         assert_eq!(
@@ -532,6 +722,136 @@ mod tests {
                 ),
                 "invalid path in {source:?}"
             );
+        }
+    }
+
+    /// Test 47 (C2 rows): COPY_DEFAULT_WITH is sequential; absent means empty.
+    #[test]
+    fn chain_selection_default_override_and_empty() {
+        let source = "SOURCE r:\n  COPY a/ a/ AS a\n\
+                      COPY_DEFAULT_WITH [enrichment-injection --template-set default]\n\
+                      SOURCE r:\n  COPY b/ b/ AS b\n\
+                      COPY_DEFAULT_WITH [enrichment-trim]\n\
+                      SOURCE r:\n  COPY c/ c/ AS c\n\
+                      COPY_DEFAULT_WITH []\n\
+                      SOURCE r:\n  COPY d/ d/ AS d";
+        let recipe = run(source, &ArgInput::Open);
+        let chains: Vec<(String, Vec<&str>)> = recipe
+            .instructions
+            .iter()
+            .filter_map(|i| match i {
+                Instruction::Source(s) => Some(s),
+                Instruction::Run(_) => None,
+            })
+            .flat_map(|s| s.copies.iter())
+            .map(|c| (c.key.clone(), chain_names(&c.forward_chain)))
+            .collect();
+        assert_eq!(
+            chains,
+            vec![
+                ("a".to_string(), vec![]),
+                ("b".to_string(), vec!["enrichment-injection"]),
+                ("c".to_string(), vec!["enrichment-trim"]),
+                ("d".to_string(), vec![]),
+            ],
+            "each COPY takes the default in effect at its position"
+        );
+        let single = run(
+            "COPY_DEFAULT_WITH [enrichment-injection --template-set default]\nSOURCE r:\n  COPY . x/ AS k",
+            &ArgInput::Open,
+        );
+        let first = &first_source(&single).copies[0].forward_chain[0];
+        assert_eq!(
+            (first.transform_id, first.version_id, first.version),
+            (3, 3, 1),
+            "the chain element resolves to the catalog row"
+        );
+    }
+
+    /// Test 48 (C2 rows): COPY chains need file transforms; RUN needs a directory transform.
+    #[test]
+    fn scope_mismatch_errors() {
+        let wrong = |name: &str, expected, found| ParseErrorKind::WrongScope {
+            name: name.into(),
+            expected,
+            found,
+        };
+        let cases = [
+            (
+                "COPY_DEFAULT_WITH [flatten]",
+                wrong("flatten", TransformScope::File, TransformScope::Directory),
+                1,
+                20,
+            ),
+            (
+                "RUN enrichment-injection",
+                wrong(
+                    "enrichment-injection",
+                    TransformScope::Directory,
+                    TransformScope::File,
+                ),
+                1,
+                1,
+            ),
+        ];
+        for (source, kind, line, col) in cases {
+            assert_eq!(
+                parse_error(source, &ArgInput::Open),
+                (kind, line, col),
+                "scope mismatch in {source:?}"
+            );
+        }
+    }
+
+    /// Test 49: an unknown transform is an error in a chain and on RUN, pinned or not.
+    #[test]
+    fn unknown_transform_errors() {
+        let unknown = ParseErrorKind::UnknownTransform {
+            name: "nope".into(),
+        };
+        for (source, col) in [
+            ("COPY_DEFAULT_WITH [nope]", 20),
+            ("RUN nope", 1),
+            ("RUN nope@1", 1),
+        ] {
+            assert_eq!(
+                parse_error(source, &ArgInput::Open),
+                (unknown.clone(), 1, col),
+                "unknown transform in {source:?}"
+            );
+        }
+    }
+
+    /// Test 50: RUN @N pins a version; unpinned follows current; a missing version errors.
+    #[test]
+    fn transform_pin_resolves_and_missing_pin_errors() {
+        let catalog = MemCatalog::builtins().with_versions(
+            "pack",
+            TransformScope::Directory,
+            2,
+            &[(1, 20), (2, 21)],
+        );
+        let version_of = |source: &str| {
+            let recipe = run_with(source, &ArgInput::Open, &catalog);
+            let t = &runs(&recipe)[0].transform;
+            (t.version, t.version_id)
+        };
+        assert_eq!(version_of("RUN pack"), (2, 21), "unpinned follows current");
+        assert_eq!(version_of("RUN pack@1"), (1, 20), "pinned to version 1");
+        match run_err_with("RUN pack@9", &ArgInput::Open, &catalog) {
+            Error::Parse { location, kind } => assert_eq!(
+                (kind, location.line, location.col),
+                (
+                    ParseErrorKind::TransformVersionNotFound {
+                        name: "pack".into(),
+                        version: 9
+                    },
+                    1,
+                    1
+                ),
+                "missing pinned version"
+            ),
+            other => panic!("expected a parse error, got {other:?}"),
         }
     }
 }

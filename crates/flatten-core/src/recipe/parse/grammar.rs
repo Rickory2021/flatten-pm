@@ -7,16 +7,24 @@
 // Only SOURCE and COPY consume a trailing `:` (the block colon, F-17). The
 // colon is optional on a childless block and required when children follow.
 //
-// Implemented so far (plan chunk C1): ARG, SOURCE, COPY. Any other first
-// token is an unknown instruction until its chunk lands.
+// Transform chains (`[t1 --flag v, t2]`) are read in chain mode; RUN flags
+// in word mode. Flags are `--name value`, `--name=value`, or a bare `--name`
+// (value `true`). On RUN, `--only` is reserved and takes every following
+// non-flag token as a glob.
+//
+// Implemented so far (plan chunk C2): ARG, COPY_DEFAULT_WITH, SOURCE, COPY,
+// RUN. Any other first token is an unknown instruction until its chunk lands.
 
-use super::ast::{Ast, CopyAst, Item, Segment, Word};
-use super::lexer::{LogicalLine, RawSegment, Token};
-use super::path::is_arg_name;
+use std::collections::HashSet;
+
+use super::ast::{Ast, ChainElem, CopyAst, Flag, Item, Segment, Word};
+use super::lexer::{ChainToken, LogicalLine, RawSegment, Token};
+use super::path::{is_arg_name, is_flag_name, is_name};
 use crate::recipe::error::{Error, ParseErrorKind, Result, parse_err};
+use crate::recipe::types::Position;
 
 /// Instruction keywords implemented so far.
-const KEYWORDS: &[&str] = &["ARG", "SOURCE", "COPY"];
+const KEYWORDS: &[&str] = &["ARG", "COPY_DEFAULT_WITH", "SOURCE", "RUN", "COPY"];
 /// Keywords that open a block and consume a trailing `:`.
 const BLOCK_KEYWORDS: &[&str] = &["SOURCE", "COPY"];
 
@@ -110,7 +118,7 @@ fn misplaced(child: &Node, parent: &'static str) -> Error {
         Some((keyword, _)) => parse_err(
             child.line.pos,
             ParseErrorKind::NotAllowedIn {
-                instr: keyword.to_string(),
+                instr: keyword,
                 parent,
             },
         ),
@@ -124,7 +132,19 @@ fn top_level(node: Node) -> Result<Item> {
             no_children(&node)?;
             arg(&node.line)
         }
+        Some(("COPY_DEFAULT_WITH", _)) => {
+            no_children(&node)?;
+            let chain = chain(&node.line, "COPY_DEFAULT_WITH")?;
+            Ok(Item::CopyDefaultWith {
+                chain,
+                pos: node.line.pos,
+            })
+        }
         Some(("SOURCE", colon)) => source(node, colon),
+        Some(("RUN", _)) => {
+            no_children(&node)?;
+            run(&node.line)
+        }
         Some(("COPY", _)) => Err(parse_err(node.line.pos, ParseErrorKind::CopyOutsideSource)),
         _ => Err(unknown(&node.line.first)),
     }
@@ -150,6 +170,10 @@ fn block_args(
 ) -> Result<(Vec<Token>, bool)> {
     let mut args = line.words()?;
     if colon_on_keyword {
+        // SPEC-DEVIATION(EX-001): `SOURCE: r` reports Syntax (a malformed
+        // SOURCE), not the UnknownInstruction the spec's colon rule implies
+        // (`SOURCE:` is only a keyword when nothing follows it). Syntax names
+        // the instruction the author meant.
         if !args.is_empty() {
             return Err(parse_err(line.pos, malformed));
         }
@@ -310,6 +334,213 @@ fn copy(node: Node, colon_on_keyword: bool) -> Result<CopyAst> {
     })
 }
 
+const CHAIN_FORM: &str = "[transform --flag value, ...]";
+const FLAG_FORM: &str = "--flag [value]";
+const NAME_FORM: &str = "a transform name matching [A-Za-z0-9][A-Za-z0-9_.-]*";
+const ONLY_FORM: &str = "--only <glob>...";
+const RUN_FORM: &str = "RUN <transform>[@N] [--flag value ...] [--only <glob>...]";
+
+fn syntax(pos: Position, instr: &'static str, expected: &'static str) -> Error {
+    parse_err(pos, ParseErrorKind::Syntax { instr, expected })
+}
+
+/// Parse the rest of a line as a transform chain:
+/// `[]` or `[name flag*, name flag*, ...]`.
+fn chain(line: &LogicalLine, instr: &'static str) -> Result<Vec<ChainElem>> {
+    let tokens = line.chain()?;
+    let mut rest = tokens.iter().peekable();
+    match rest.next() {
+        Some(ChainToken::Open(_)) => {}
+        Some(other) => return Err(syntax(other.pos(), instr, CHAIN_FORM)),
+        None => return Err(syntax(line.pos, instr, CHAIN_FORM)),
+    }
+
+    let mut elems = Vec::new();
+    if matches!(rest.peek(), Some(ChainToken::Close(_))) {
+        rest.next();
+    } else {
+        loop {
+            let name_token = match rest.next() {
+                Some(ChainToken::Word(token)) => token,
+                Some(other) => return Err(syntax(other.pos(), instr, CHAIN_FORM)),
+                None => return Err(syntax(line.pos, instr, CHAIN_FORM)),
+            };
+            let (name, pin) = split_pin(name_token, instr)?;
+            if pin.is_some() {
+                return Err(parse_err(name_token.pos, ParseErrorKind::PinNotAllowed));
+            }
+
+            let mut words = Vec::new();
+            while let Some(ChainToken::Word(token)) = rest.peek() {
+                words.push(token.clone());
+                rest.next();
+            }
+            let (flags, _) = parse_flags(&words, instr, false)?;
+            elems.push(ChainElem {
+                name,
+                flags,
+                pos: name_token.pos,
+            });
+
+            match rest.next() {
+                Some(ChainToken::Comma(_)) => {}
+                Some(ChainToken::Close(_)) => break,
+                Some(other) => return Err(syntax(other.pos(), instr, CHAIN_FORM)),
+                None => return Err(syntax(line.pos, instr, CHAIN_FORM)),
+            }
+        }
+    }
+
+    if let Some(extra) = rest.next() {
+        return Err(syntax(extra.pos(), instr, CHAIN_FORM));
+    }
+    Ok(elems)
+}
+
+/// `RUN <transform>[@N] [flags] [--only <glob> ...]`.
+fn run(line: &LogicalLine) -> Result<Item> {
+    let words = line.words()?;
+    let Some((name_token, rest)) = words.split_first() else {
+        return Err(syntax(line.pos, "RUN", RUN_FORM));
+    };
+    let (name, pin) = split_pin(name_token, "RUN")?;
+    let pin = match pin {
+        None => None,
+        Some(digits) => Some(parse_pin(&digits).ok_or_else(|| {
+            parse_err(
+                name_token.pos,
+                ParseErrorKind::InvalidNumber {
+                    what: "version pin",
+                },
+            )
+        })?),
+    };
+    let (flags, only) = parse_flags(rest, "RUN", true)?;
+    Ok(Item::Run {
+        name,
+        pin,
+        flags,
+        only,
+        pos: line.pos,
+    })
+}
+
+/// Split a bare `name` or `name@N` token. Returns the name and the pin text.
+fn split_pin(token: &Token, instr: &'static str) -> Result<(String, Option<String>)> {
+    let Some(text) = token.bare_text() else {
+        return Err(syntax(token.pos, instr, NAME_FORM));
+    };
+    let (name, pin) = match text.split_once('@') {
+        Some((name, pin)) => (name, Some(pin.to_string())),
+        None => (text, None),
+    };
+    if !is_name(name) {
+        return Err(syntax(token.pos, instr, NAME_FORM));
+    }
+    Ok((name.to_string(), pin))
+}
+
+/// A version pin: decimal, >= 1, fits u32.
+fn parse_pin(digits: &str) -> Option<u32> {
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<u32>().ok().filter(|n| *n >= 1)
+}
+
+/// A token that starts with a bare `--`: its name and inline `=value`.
+/// Returns None for a non-flag token.
+fn flag_parts(token: &Token) -> Option<(String, Option<Word>)> {
+    let Some(RawSegment::Bare(first)) = token.segments.first() else {
+        return None;
+    };
+    let rest_of_first = first.strip_prefix("--")?;
+    let mut segments = token.segments.clone();
+    if rest_of_first.is_empty() {
+        segments.remove(0);
+    } else {
+        segments[0] = RawSegment::Bare(rest_of_first.to_string());
+    }
+    let stripped = Token {
+        segments,
+        pos: token.pos,
+    };
+    let (name_part, value) = match split_assign(&stripped) {
+        Some((name_part, value_part)) => (name_part, Some(to_word(&value_part, token))),
+        None => (stripped.segments.clone(), None),
+    };
+    let name = match name_part.as_slice() {
+        [] => String::new(),
+        [RawSegment::Bare(text)] => text.clone(),
+        _ => Token {
+            segments: name_part,
+            pos: token.pos,
+        }
+        .display(),
+    };
+    Some((name, value))
+}
+
+/// Parse a run of flag tokens. With `allow_only`, `--only` collects globs
+/// (every following non-flag token) and may repeat; otherwise it is an
+/// ordinary flag. Returns the flags and the `--only` globs.
+fn parse_flags(
+    tokens: &[Token],
+    instr: &'static str,
+    allow_only: bool,
+) -> Result<(Vec<Flag>, Vec<Word>)> {
+    let mut out = Vec::new();
+    let mut only = Vec::new();
+    let mut seen = HashSet::new();
+    let mut i = 0;
+    while let Some(token) = tokens.get(i) {
+        let Some((name, inline)) = flag_parts(token) else {
+            return Err(syntax(token.pos, instr, FLAG_FORM));
+        };
+        if !is_flag_name(&name) {
+            return Err(syntax(token.pos, instr, FLAG_FORM));
+        }
+        i += 1;
+
+        if allow_only && name == "only" {
+            let before = only.len();
+            only.extend(inline);
+            while let Some(glob) = tokens.get(i).filter(|t| flag_parts(t).is_none()) {
+                only.push(to_word(&glob.segments, glob));
+                i += 1;
+            }
+            if only.len() == before {
+                return Err(syntax(token.pos, instr, ONLY_FORM));
+            }
+            continue;
+        }
+
+        let value = match inline {
+            Some(value) => value,
+            None => match tokens.get(i).filter(|t| flag_parts(t).is_none()) {
+                Some(value) => {
+                    i += 1;
+                    to_word(&value.segments, value)
+                }
+                None => Word {
+                    segments: vec![Segment::Lit("true".to_string())],
+                    pos: token.pos,
+                },
+            },
+        };
+        if !seen.insert(name.clone()) {
+            return Err(parse_err(
+                token.pos,
+                ParseErrorKind::Duplicate {
+                    what: format!("flag --{name}"),
+                },
+            ));
+        }
+        out.push(Flag { name, value });
+    }
+    Ok((out, only))
+}
+
 /// Convert raw segments to a Word: bare and quoted text merge into literals.
 fn to_word(segments: &[RawSegment], token: &Token) -> Word {
     let mut out: Vec<Segment> = Vec::new();
@@ -333,8 +564,9 @@ fn to_word(segments: &[RawSegment], token: &Token) -> Word {
 
 #[cfg(test)]
 mod tests {
+    use crate::recipe::SHIPPED_DEFAULT_RECIPE;
     use crate::recipe::error::{Error, ParseErrorKind};
-    use crate::recipe::parse::ast::{Ast, Item, Segment};
+    use crate::recipe::parse::ast::{Ast, ChainElem, Flag, Item, Segment};
     use crate::recipe::parse::parse;
     use crate::recipe::types::Position;
 
@@ -355,6 +587,37 @@ mod tests {
     }
 
     const COPY_FORM: &str = "COPY <src> <dest> AS <key>";
+    const CHAIN_FORM: &str = "[transform --flag value, ...]";
+    const FLAG_FORM: &str = "--flag [value]";
+    const NAME_FORM: &str = "a transform name matching [A-Za-z0-9][A-Za-z0-9_.-]*";
+    const ONLY_FORM: &str = "--only <glob>...";
+    const RUN_FORM: &str = "RUN <transform>[@N] [--flag value ...] [--only <glob>...]";
+
+    /// Flags as (name, value-as-written) pairs.
+    fn flag_pairs(flags: &[Flag]) -> Vec<(String, String)> {
+        flags
+            .iter()
+            .map(|f| (f.name.clone(), f.value.display()))
+            .collect()
+    }
+
+    /// The chain of a one-line COPY_DEFAULT_WITH recipe as (name, flags).
+    fn chain_of(source: &str) -> Vec<(String, Vec<(String, String)>)> {
+        match ast(source).items.as_slice() {
+            [Item::CopyDefaultWith { chain, .. }] => chain
+                .iter()
+                .map(|ChainElem { name, flags, .. }| (name.clone(), flag_pairs(flags)))
+                .collect(),
+            other => panic!("expected one COPY_DEFAULT_WITH, got {other:?}"),
+        }
+    }
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
 
     /// Test 18: COPY outside a SOURCE block is an error at the COPY.
     #[test]
@@ -390,18 +653,12 @@ mod tests {
                 3,
                 5,
             ),
+            ("SOURCE r:\n  RUN flatten", "RUN", "SOURCE", 2, 3),
         ];
         for (source, instr, parent, line, col) in cases {
             assert_eq!(
                 parse_error(source),
-                (
-                    ParseErrorKind::NotAllowedIn {
-                        instr: instr.into(),
-                        parent
-                    },
-                    line,
-                    col
-                ),
+                (ParseErrorKind::NotAllowedIn { instr, parent }, line, col),
                 "misplaced instruction in {source:?}"
             );
         }
@@ -437,6 +694,11 @@ mod tests {
             parse_error("SOURCE r:\n  COPY . x/ AS k\n    ARG a"),
             (ParseErrorKind::MissingColon { instr: "COPY" }, 2, 3),
             "COPY with children and no colon"
+        );
+        assert_eq!(
+            parse_error("SOURCE \"r:\"\n  COPY . x/ AS k"),
+            (ParseErrorKind::MissingColon { instr: "SOURCE" }, 1, 1),
+            "a quoted colon is not a block colon"
         );
     }
 
@@ -580,6 +842,163 @@ mod tests {
                 parse_error(source),
                 (ParseErrorKind::InvalidArgName { name: name.into() }, 1, 5),
                 "invalid ARG name in {source:?}"
+            );
+        }
+    }
+
+    /// Test 22 (F-17): the colon is optional on a childless block; the shipped text parses.
+    #[test]
+    fn childless_block_colon_optional() {
+        assert!(
+            SHIPPED_DEFAULT_RECIPE.starts_with("ARG repo\n"),
+            "the file's directory comment is stripped from the embedded text"
+        );
+        assert_eq!(
+            crate::recipe::strip_prefix_const("abc", "x"),
+            "abc",
+            "no prefix match leaves the text unchanged"
+        );
+        assert_eq!(
+            crate::recipe::strip_prefix_const("ab", "abc"),
+            "ab",
+            "a prefix longer than the text leaves it unchanged"
+        );
+        let items = ast(SHIPPED_DEFAULT_RECIPE).items;
+        assert_eq!(items.len(), 5, "ARG, COPY_DEFAULT_WITH, SOURCE, RUN, RUN");
+        match &items[2] {
+            Item::Source { copies, .. } => {
+                assert_eq!(copies.len(), 1, "one COPY without a colon")
+            }
+            other => panic!("expected SOURCE, got {other:?}"),
+        }
+        let with_colon = ast("SOURCE r:\n  COPY . x/ AS k:\nRUN flatten").items;
+        assert_eq!(with_colon.len(), 2, "a childless COPY may keep its colon");
+    }
+
+    /// Test 30: chain forms, including quoted values and `--only` as an ordinary flag.
+    #[test]
+    fn chain_forms_parse() {
+        let cdw = |chain: &str| chain_of(&format!("COPY_DEFAULT_WITH {chain}"));
+        assert_eq!(cdw("[]"), vec![], "empty chain");
+        assert_eq!(cdw("[a]"), vec![("a".into(), vec![])], "one element");
+        assert_eq!(
+            cdw("[ a --k v , b --x=y --flag ]"),
+            vec![
+                ("a".into(), pairs(&[("k", "v")])),
+                ("b".into(), pairs(&[("x", "y"), ("flag", "true")])),
+            ],
+            "spaced punctuation, inline value, bare flag"
+        );
+        assert_eq!(
+            cdw("[a --k \"q ]\"]"),
+            vec![("a".into(), pairs(&[("k", "q ]")]))],
+            "a quoted bracket is literal"
+        );
+        assert_eq!(
+            cdw("[a --only x]"),
+            vec![("a".into(), pairs(&[("only", "x")]))],
+            "--only is an ordinary flag in a chain"
+        );
+        assert_eq!(
+            cdw("[a --k ${v}, b --empty=]"),
+            vec![
+                ("a".into(), pairs(&[("k", "${v}")])),
+                ("b".into(), pairs(&[("empty", "")])),
+            ],
+            "variable value and empty inline value"
+        );
+    }
+
+    /// Test 31: malformed chains.
+    #[test]
+    fn chain_malformed_errors() {
+        let cdw = "COPY_DEFAULT_WITH";
+        let cases = [
+            ("COPY_DEFAULT_WITH", syntax(cdw, CHAIN_FORM), 1),
+            ("COPY_DEFAULT_WITH a", syntax(cdw, CHAIN_FORM), 19),
+            ("COPY_DEFAULT_WITH [a", syntax(cdw, CHAIN_FORM), 1),
+            ("COPY_DEFAULT_WITH [a,]", syntax(cdw, CHAIN_FORM), 22),
+            ("COPY_DEFAULT_WITH [a,,b]", syntax(cdw, CHAIN_FORM), 22),
+            ("COPY_DEFAULT_WITH [a] x", syntax(cdw, CHAIN_FORM), 23),
+            ("COPY_DEFAULT_WITH [a b]", syntax(cdw, FLAG_FORM), 22),
+            ("COPY_DEFAULT_WITH [a --Bad]", syntax(cdw, FLAG_FORM), 22),
+            ("COPY_DEFAULT_WITH [\"a\"]", syntax(cdw, NAME_FORM), 20),
+            ("COPY_DEFAULT_WITH [a!b]", syntax(cdw, NAME_FORM), 20),
+            ("COPY_DEFAULT_WITH [a@2]", ParseErrorKind::PinNotAllowed, 20),
+            (
+                "COPY_DEFAULT_WITH [a --k 1 --k 2]",
+                ParseErrorKind::Duplicate {
+                    what: "flag --k".into(),
+                },
+                28,
+            ),
+        ];
+        for (source, kind, col) in cases {
+            assert_eq!(
+                parse_error(source),
+                (kind, 1, col),
+                "malformed chain in {source:?}"
+            );
+        }
+    }
+
+    /// Test 32: RUN with a pin, flags, and repeated `--only` globs.
+    #[test]
+    fn run_parses_pin_flags_and_only() {
+        let source = "RUN pack@2 --format xml --only a/** b/** --file-limit=1 --dry --only c/**";
+        match ast(source).items.as_slice() {
+            [
+                Item::Run {
+                    name,
+                    pin,
+                    flags,
+                    only,
+                    pos,
+                },
+            ] => {
+                assert_eq!(name, "pack", "transform name");
+                assert_eq!(*pin, Some(2), "version pin");
+                assert_eq!(
+                    flag_pairs(flags),
+                    pairs(&[("format", "xml"), ("file-limit", "1"), ("dry", "true")]),
+                    "flags in order; --only is not a flag"
+                );
+                let globs: Vec<String> = only.iter().map(|w| w.display()).collect();
+                assert_eq!(globs, vec!["a/**", "b/**", "c/**"], "globs accumulate");
+                assert_eq!(*pos, Position::new(1, 1), "RUN position");
+            }
+            other => panic!("expected one RUN, got {other:?}"),
+        }
+    }
+
+    /// Test 33 (RUN rows; C4 adds the INVOKE rows): malformed RUN lines.
+    #[test]
+    fn run_and_invoke_malformed_errors() {
+        let bad_pin = ParseErrorKind::InvalidNumber {
+            what: "version pin",
+        };
+        let cases = [
+            ("RUN", syntax("RUN", RUN_FORM), 1),
+            ("RUN pack --only", syntax("RUN", ONLY_FORM), 10),
+            ("RUN pack --only a --only", syntax("RUN", ONLY_FORM), 19),
+            ("RUN pack extra", syntax("RUN", FLAG_FORM), 10),
+            ("RUN \"pack\"", syntax("RUN", NAME_FORM), 5),
+            ("RUN pack@0", bad_pin.clone(), 5),
+            ("RUN pack@x", bad_pin.clone(), 5),
+            ("RUN pack@", bad_pin, 5),
+            (
+                "RUN pack --format a --format b",
+                ParseErrorKind::Duplicate {
+                    what: "flag --format".into(),
+                },
+                21,
+            ),
+        ];
+        for (source, kind, col) in cases {
+            assert_eq!(
+                parse_error(source),
+                (kind, 1, col),
+                "malformed RUN {source:?}"
             );
         }
     }
