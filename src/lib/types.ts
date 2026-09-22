@@ -33,3 +33,39 @@ export function isCommandError(e: unknown): e is CommandError {
     typeof (e as CommandError).kind === "string"
   );
 }
+
+// ---------------------------------------------------------------------------
+// Repo types (APP-003)
+// ---------------------------------------------------------------------------
+
+/** A repos table row. Mirrors flatten_core::ingest::RepoRow. */
+export interface RepoRow {
+  id: number;
+  path: string;
+  name: string;
+  ingest_patterns: string[];
+  line_ending_policy: string;
+  trie_updated_at: string | null;
+  created_at: string;
+  deleted_at: string | null;
+}
+
+/** Result of an ingest operation. Mirrors commands::repo::IngestReportDto. */
+export interface IngestReport {
+  file_count: number;
+  root_hash: string;
+  lossy_count: number;
+  enrichment_count: number;
+}
+
+/** Returned by repoAdd. Contains the new repo's ID and ingest report. */
+export interface RepoAddResult {
+  id: number;
+  report: IngestReport;
+}
+
+/** Returned by repoReadFile. Distinguishes symlinks from regular files. */
+export interface FilePreviewResult {
+  kind: "file" | "symlink";
+  content: string;
+}
