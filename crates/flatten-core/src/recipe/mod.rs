@@ -21,7 +21,7 @@ mod types;
 
 use catalog::PendingOverlay;
 
-pub use catalog::{Catalog, RecipeSource, TransformInfo, TransformScope};
+pub use catalog::{Catalog, DbCatalog, RecipeSource, TransformInfo, TransformScope};
 pub use error::{Error, InvokeSite, Location, ParseErrorKind, PathIssue, Result, SourceRef};
 pub use lint::{LintCode, LintWarning};
 pub use parse::resolve::{ArgInput, Resolution, RootRef};

@@ -35,6 +35,11 @@ pub enum Error {
         /// The undeclared ARG name.
         name: String,
     },
+
+    /// A database failure while reading the catalog, including a corrupt
+    /// row (an unknown transform scope).
+    #[error(transparent)]
+    Database(#[from] crate::db::error::Error),
 }
 
 /// Convenience alias for recipe operations.

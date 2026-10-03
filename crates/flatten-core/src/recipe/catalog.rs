@@ -3,21 +3,27 @@
 // The lookups resolve needs from stored entities, behind a trait.
 //
 // Resolve asks the catalog for transforms by name and for recipe versions
-// (INVOKE). `DbCatalog` (C7) reads SQLite; `MemCatalog` is the in-memory test
-// double. The trait is object-safe: resolve takes `&dyn Catalog`, so there is
-// one instantiation and no generic plumbing.
+// (INVOKE). `DbCatalog` reads SQLite through a reader or writer connection;
+// `MemCatalog` is the in-memory test double. The trait is object-safe:
+// resolve takes `&dyn Catalog`, so there is one instantiation and no generic
+// plumbing.
+//
+// `DbCatalog` hides soft-deleted rows: a parent or version row with
+// `deleted_at` set is absent. A `transforms.scope` value other than `file` or
+// `directory` is a corrupt row and surfaces as `Error::Database`.
 //
 // `PendingOverlay` wraps a catalog while unsaved text is analyzed under a
 // recipe name (add, edit): an unpinned lookup of that name returns the
 // pending text, so a self-INVOKE is caught as the cycle export would see.
 // Only `analyze` builds it.
 //
-// Implemented so far (plan chunk C6): transform and recipe lookup, and the
-// reverse-transform lookup lint uses.
-
 use std::fmt;
 
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
+use rusqlite::{Connection, OptionalExtension, Row};
+
 use super::error::Result;
+use crate::db;
 
 /// A transform's scope. File transforms run in COPY chains; directory
 /// transforms run through RUN.
@@ -27,6 +33,20 @@ pub enum TransformScope {
     File,
     /// Reshapes the whole run folder.
     Directory,
+}
+
+/// `transforms.scope` text: `file` or `directory`; anything else is a
+/// conversion failure (a corrupt row).
+impl FromSql for TransformScope {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value.as_str()? {
+            "file" => Ok(TransformScope::File),
+            "directory" => Ok(TransformScope::Directory),
+            other => Err(FromSqlError::Other(
+                format!("unknown transform scope {other:?}").into(),
+            )),
+        }
+    }
 }
 
 impl fmt::Display for TransformScope {
@@ -85,6 +105,85 @@ pub trait Catalog {
     /// Non-deleted transforms whose `reverses` is `name`, at their current
     /// versions, ordered by id.
     fn reversers_of(&self, name: &str) -> Result<Vec<TransformInfo>>;
+}
+
+/// The catalog over a SQLite connection (reader or writer).
+pub struct DbCatalog<'c> {
+    conn: &'c Connection,
+}
+
+impl<'c> DbCatalog<'c> {
+    /// A catalog that reads through `conn`.
+    pub fn new(conn: &'c Connection) -> Self {
+        DbCatalog { conn }
+    }
+}
+
+/// Columns: t.id, t.name, t.scope, t.reverses, v.id, v.version.
+const TRANSFORM_COLUMNS: &str = "SELECT t.id, t.name, t.scope, t.reverses, v.id, v.version \
+     FROM transforms t JOIN transform_versions v ON v.transform_id = t.id \
+     WHERE t.deleted_at IS NULL AND v.deleted_at IS NULL";
+
+fn transform_row(row: &Row<'_>) -> rusqlite::Result<TransformInfo> {
+    Ok(TransformInfo {
+        transform_id: row.get(0)?,
+        name: row.get(1)?,
+        scope: row.get(2)?,
+        reverses: row.get(3)?,
+        version_id: row.get(4)?,
+        version: row.get(5)?,
+    })
+}
+
+impl Catalog for DbCatalog<'_> {
+    fn transform(&self, name: &str, version: Option<u32>) -> Result<Option<TransformInfo>> {
+        let sql = format!(
+            "{TRANSFORM_COLUMNS} AND t.name = ?1 \
+             AND CASE WHEN ?2 IS NULL THEN v.id = t.current_version_id ELSE v.version = ?2 END"
+        );
+        Ok(self
+            .conn
+            .query_row(&sql, rusqlite::params![name, version], transform_row)
+            .optional()
+            .map_err(db::error::Error::from)?)
+    }
+
+    fn reversers_of(&self, name: &str) -> Result<Vec<TransformInfo>> {
+        let sql = format!(
+            "{TRANSFORM_COLUMNS} AND t.reverses = ?1 AND v.id = t.current_version_id \
+             ORDER BY t.id"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(db::error::Error::from)?;
+        let rows = stmt
+            .query_map([name], transform_row)
+            .map_err(db::error::Error::from)?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db::error::Error::from)?)
+    }
+
+    fn recipe(&self, name: &str, version: Option<u32>) -> Result<Option<RecipeSource>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT r.id, r.name, v.id, v.version, v.source \
+                 FROM build_recipes r JOIN build_recipe_versions v ON v.build_recipe_id = r.id \
+                 WHERE r.deleted_at IS NULL AND v.deleted_at IS NULL AND r.name = ?1 \
+                 AND CASE WHEN ?2 IS NULL THEN v.id = r.current_version_id ELSE v.version = ?2 END",
+                rusqlite::params![name, version],
+                |row| {
+                    Ok(RecipeSource {
+                        recipe_id: Some(row.get(0)?),
+                        name: row.get(1)?,
+                        version_id: Some(row.get(2)?),
+                        version: Some(row.get(3)?),
+                        source: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(db::error::Error::from)?)
+    }
 }
 
 /// A catalog with one recipe name answered from pending (unsaved) text.
@@ -315,5 +414,211 @@ impl MemTransform {
                 version_id,
                 version,
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Catalog, DbCatalog, TransformInfo, TransformScope};
+    use crate::db::writer::Writer;
+    use crate::db::{error as db_error, open_reader};
+    use crate::recipe::{
+        ArgInput, Error, ParseErrorKind, RootRef, SHIPPED_DEFAULT_RECIPE, analyze,
+    };
+
+    /// A seeded database with a writer for setup and a reader for lookups.
+    fn seeded() -> (tempfile::NamedTempFile, Writer, rusqlite::Connection) {
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        let writer = Writer::open(tmp.path()).expect("Writer::open");
+        let reader = open_reader(tmp.path()).expect("open_reader");
+        (tmp, writer, reader)
+    }
+
+    /// Run setup SQL in one write transaction.
+    fn exec(writer: &Writer, sql: &'static str) {
+        writer
+            .call_write(move |conn| {
+                conn.execute_batch(sql).map_err(db_error::Error::from)?;
+                Ok(())
+            })
+            .unwrap_or_else(|e| panic!("setup SQL failed: {e}\n{sql}"));
+    }
+
+    /// Test 80: builtin rows round-trip; pins and current pointers resolve;
+    /// a corrupt scope is a database error.
+    #[test]
+    fn db_catalog_reads_scope_reverses_and_versions() {
+        let (_tmp, writer, reader) = seeded();
+        let catalog = DbCatalog::new(&reader);
+
+        assert_eq!(
+            catalog.transform("enrichment-trim", None).expect("query"),
+            Some(TransformInfo {
+                transform_id: 4,
+                name: "enrichment-trim".into(),
+                scope: TransformScope::File,
+                reverses: Some("enrichment-injection".into()),
+                version_id: 4,
+                version: 1,
+            }),
+            "the seeded enrichment-trim row"
+        );
+        assert_eq!(
+            catalog
+                .transform("pack", None)
+                .expect("query")
+                .map(|t| t.scope),
+            Some(TransformScope::Directory),
+            "pack is a directory transform"
+        );
+        assert!(
+            catalog.transform("nope", None).expect("query").is_none(),
+            "an unknown name is None"
+        );
+        assert!(
+            catalog.transform("pack", Some(2)).expect("query").is_none(),
+            "a missing pinned version is None"
+        );
+        assert_eq!(
+            catalog
+                .reversers_of("enrichment-injection")
+                .expect("query")
+                .into_iter()
+                .map(|t| t.name)
+                .collect::<Vec<_>>(),
+            vec!["enrichment-trim".to_string()],
+            "enrichment-trim reverses enrichment-injection"
+        );
+        assert!(
+            catalog.reversers_of("flatten").expect("query").is_empty(),
+            "nothing reverses flatten"
+        );
+
+        let shipped = catalog
+            .recipe("shipped-default", None)
+            .expect("query")
+            .expect("the shipped recipe exists");
+        assert_eq!(
+            (shipped.recipe_id, shipped.version_id, shipped.version),
+            (Some(1), Some(1), Some(1)),
+            "shipped-default ids and version"
+        );
+        assert_eq!(shipped.source, SHIPPED_DEFAULT_RECIPE, "the seeded text");
+        assert!(
+            catalog
+                .recipe("shipped-default", Some(2))
+                .expect("query")
+                .is_none(),
+            "a missing pinned recipe version is None"
+        );
+
+        exec(
+            &writer,
+            "INSERT INTO transform_versions (id, transform_id, version, source) VALUES (20, 2, 2, 'v2');
+             UPDATE transforms SET current_version_id = 20 WHERE id = 2;",
+        );
+        assert_eq!(
+            catalog
+                .transform("pack", None)
+                .expect("query")
+                .map(|t| (t.version, t.version_id)),
+            Some((2, 20)),
+            "unpinned follows the current pointer"
+        );
+        assert_eq!(
+            catalog
+                .transform("pack", Some(1))
+                .expect("query")
+                .map(|t| (t.version, t.version_id)),
+            Some((1, 2)),
+            "a pin reads the older version"
+        );
+
+        exec(
+            &writer,
+            "INSERT INTO transforms (id, name, scope) VALUES (30, 'bad', 'bogus');
+             INSERT INTO transform_versions (id, transform_id, version, source) VALUES (30, 30, 1, 'x');
+             UPDATE transforms SET current_version_id = 30 WHERE id = 30;",
+        );
+        assert!(
+            matches!(catalog.transform("bad", None), Err(Error::Database(_))),
+            "an unknown scope value is a corrupt row"
+        );
+    }
+
+    /// Test 81: soft-deleted parents and versions are absent, so INVOKE and
+    /// pinned lookups report them as missing.
+    #[test]
+    fn db_catalog_excludes_soft_deleted() {
+        let (_tmp, writer, reader) = seeded();
+        exec(
+            &writer,
+            "INSERT INTO transforms (id, name, scope, reverses) VALUES (40, 'gone-t', 'file', 'x');
+             INSERT INTO transform_versions (id, transform_id, version, source) VALUES (40, 40, 1, 's');
+             UPDATE transforms SET current_version_id = 40, deleted_at = '2026-01-01T00:00:00Z' WHERE id = 40;
+             INSERT INTO transforms (id, name, scope) VALUES (41, 'half-t', 'file');
+             INSERT INTO transform_versions (id, transform_id, version, source) VALUES (41, 41, 1, 's');
+             INSERT INTO transform_versions (id, transform_id, version, source, deleted_at)
+                 VALUES (42, 41, 2, 's', '2026-01-01T00:00:00Z');
+             UPDATE transforms SET current_version_id = 41 WHERE id = 41;
+             INSERT INTO build_recipes (id, name) VALUES (10, 'gone');
+             INSERT INTO build_recipe_versions (id, build_recipe_id, version, source)
+                 VALUES (10, 10, 1, 'SOURCE r:\n  COPY . x/ AS k');
+             UPDATE build_recipes SET current_version_id = 10, deleted_at = '2026-01-01T00:00:00Z' WHERE id = 10;
+             INSERT INTO build_recipes (id, name) VALUES (11, 'half');
+             INSERT INTO build_recipe_versions (id, build_recipe_id, version, source) VALUES (11, 11, 1, '');
+             INSERT INTO build_recipe_versions (id, build_recipe_id, version, source, deleted_at)
+                 VALUES (12, 11, 2, '', '2026-01-01T00:00:00Z');
+             UPDATE build_recipes SET current_version_id = 11 WHERE id = 11;",
+        );
+        let catalog = DbCatalog::new(&reader);
+
+        assert!(
+            catalog.transform("gone-t", None).expect("query").is_none(),
+            "a soft-deleted transform is absent"
+        );
+        assert!(
+            catalog.reversers_of("x").expect("query").is_empty(),
+            "a soft-deleted transform reverses nothing"
+        );
+        assert!(
+            catalog
+                .transform("half-t", Some(2))
+                .expect("query")
+                .is_none(),
+            "a soft-deleted version is absent"
+        );
+        assert!(
+            catalog
+                .transform("half-t", Some(1))
+                .expect("query")
+                .is_some(),
+            "the live version still resolves"
+        );
+        assert!(
+            catalog.recipe("gone", None).expect("query").is_none(),
+            "a soft-deleted recipe is absent"
+        );
+
+        let input = RootRef::Pending { name: None };
+        let kind_of = |source: &str| match analyze(source, &ArgInput::Open, &catalog, &input) {
+            Err(Error::Parse { kind, .. }) => kind,
+            other => panic!("{source:?}: expected a parse error, got {other:?}"),
+        };
+        assert_eq!(
+            kind_of("INVOKE gone"),
+            ParseErrorKind::UnknownRecipe {
+                name: "gone".into()
+            },
+            "INVOKE of a soft-deleted recipe is UnknownRecipe"
+        );
+        assert_eq!(
+            kind_of("INVOKE half@2"),
+            ParseErrorKind::RecipeVersionNotFound {
+                name: "half".into(),
+                version: 2
+            },
+            "INVOKE of a soft-deleted version is RecipeVersionNotFound"
+        );
     }
 }

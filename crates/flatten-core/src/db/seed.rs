@@ -5,8 +5,12 @@ use rusqlite::Connection;
 
 /// Insert builtin data (no-op if already seeded).
 ///
-/// Source content is placeholder. When real transforms/templates land,
-/// move builtin content to a builtins/ directory and use include_str!().
+/// The shipped recipe's text is the real one, embedded from
+/// `builtins/recipes/` (`recipe::SHIPPED_DEFAULT_RECIPE`). Transform and
+/// template sources are still placeholders until their stories land (EX-002B,
+/// EX-006). `INSERT OR IGNORE` leaves an existing database's rows as they
+/// are, so a database seeded before EX-001 keeps the old placeholder recipe
+/// text until the upgrade rule lands (EX-006, DA-001).
 pub(crate) fn run(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
 
@@ -114,8 +118,8 @@ pub(crate) fn run(conn: &mut Connection) -> Result<()> {
         [],
     )?;
     tx.execute(
-        "INSERT OR IGNORE INTO build_recipe_versions (id, build_recipe_id, version, source) VALUES (1, 1, 1, '// shipped-default recipe placeholder')",
-        [],
+        "INSERT OR IGNORE INTO build_recipe_versions (id, build_recipe_id, version, source) VALUES (1, 1, 1, ?1)",
+        [crate::recipe::SHIPPED_DEFAULT_RECIPE],
     )?;
     tx.execute(
         "UPDATE build_recipes SET current_version_id = 1 WHERE id = 1 AND current_version_id IS NULL",
@@ -278,6 +282,45 @@ mod tests {
         assert_eq!(
             null_recipes, 0,
             "all recipes should have current_version_id set"
+        );
+    }
+
+    /// Test 99 (EX-001): the seeded shipped recipe is the embedded text, and
+    /// it parses, resolves, and lints clean against the seeded catalog.
+    #[test]
+    fn seeded_shipped_recipe_parses_and_resolves() {
+        use crate::recipe::{
+            ArgInput, Catalog, DbCatalog, RootRef, SHIPPED_DEFAULT_RECIPE, analyze,
+        };
+
+        let (_tmp, conn) = seeded_db();
+        let catalog = DbCatalog::new(&conn);
+        let stored = catalog
+            .recipe("shipped-default", None)
+            .expect("catalog query")
+            .expect("shipped-default is seeded");
+        assert_eq!(
+            stored.source, SHIPPED_DEFAULT_RECIPE,
+            "the seed stores the embedded shipped text"
+        );
+
+        let root = RootRef::Stored {
+            recipe_id: 1,
+            version_id: 1,
+            name: "shipped-default".into(),
+            version: 1,
+        };
+        let resolution = analyze(&stored.source, &ArgInput::Open, &catalog, &root)
+            .unwrap_or_else(|e| panic!("the shipped recipe should resolve: {e}"));
+        assert_eq!(
+            resolution.recipe.unbound,
+            vec!["repo".to_string()],
+            "repo is the one required ARG"
+        );
+        assert!(
+            resolution.warnings.is_empty(),
+            "the shipped recipe lints clean against the seed: {:?}",
+            resolution.warnings
         );
     }
 
