@@ -2337,9 +2337,13 @@ mod tests {
             vec![("bk", vec!["enrichment-trim"]), ("ck", vec![])],
             "invoked entries merge; the root's entry wins its key"
         );
+        // Only the resolver's codes: the lint pass adds L005 here (these
+        // COPY blocks have no injection), which lint's own tests cover.
+        let resolver_codes = |w: &&LintWarning| matches!(w.code, LintCode::L006 | LintCode::L007);
         let codes: Vec<(LintCode, Position, Option<&str>)> = resolution
             .warnings
             .iter()
+            .filter(resolver_codes)
             .map(|w| (w.code, w.position, w.recipe.as_deref()))
             .collect();
         assert_eq!(
@@ -2362,8 +2366,14 @@ mod tests {
             Some(vec![]),
             "the caller's entry wins even when its WATCH comes after the INVOKE"
         );
+        let nested_resolver: Vec<LintWarning> = nested
+            .warnings
+            .iter()
+            .filter(resolver_codes)
+            .cloned()
+            .collect();
         assert_eq!(
-            nested.warnings,
+            nested_resolver,
             vec![LintWarning {
                 code: LintCode::L007,
                 message: "WATCH OVERRIDE for ik is replaced by an entry closer to the root recipe"

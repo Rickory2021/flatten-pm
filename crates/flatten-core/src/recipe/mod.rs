@@ -8,10 +8,10 @@
 // `types.rs` are the parse output contract (docs/design/3_RECIPES.md).
 // Transform lookups go through the `Catalog` trait (`catalog.rs`).
 //
-// Implemented so far (plan chunk C5): every instruction (ARG,
+// Implemented so far (plan chunk C6): every instruction (ARG,
 // COPY_DEFAULT_WITH, SOURCE, COPY with EXCLUDE and OVERRIDE_WITH, RUN,
-// INVOKE, WATCH); the resolver warnings L006 and L007. The lint pass lands
-// in C6.
+// INVOKE, WATCH); resolver warnings (L006, L007); the lint pass (L001 to
+// L005, L008).
 
 mod catalog;
 mod error;
@@ -107,6 +107,7 @@ pub fn analyze(
         }
         _ => parse::resolve::resolve(&ast, input, catalog, root)?,
     };
+    warnings.extend(lint::lint(&recipe, catalog)?);
     lint::sort_warnings(&mut warnings, &recipe);
     Ok(Resolution { recipe, warnings })
 }

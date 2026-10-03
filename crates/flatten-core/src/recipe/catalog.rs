@@ -12,7 +12,8 @@
 // pending text, so a self-INVOKE is caught as the cycle export would see.
 // Only `analyze` builds it.
 //
-// Implemented so far (plan chunk C4): transform and recipe lookup.
+// Implemented so far (plan chunk C6): transform and recipe lookup, and the
+// reverse-transform lookup lint uses.
 
 use std::fmt;
 
@@ -46,6 +47,8 @@ pub struct TransformInfo {
     pub name: String,
     /// File or directory.
     pub scope: TransformScope,
+    /// The transform this one undoes, by name (`transforms.reverses`).
+    pub reverses: Option<String>,
     /// `transform_versions.id` of the resolved version.
     pub version_id: i64,
     /// The resolved version number.
@@ -78,6 +81,10 @@ pub trait Catalog {
     /// version; `Some(n)` means version `n`. Returns `Ok(None)` when the
     /// recipe, or that version of it, does not exist.
     fn recipe(&self, name: &str, version: Option<u32>) -> Result<Option<RecipeSource>>;
+
+    /// Non-deleted transforms whose `reverses` is `name`, at their current
+    /// versions, ordered by id.
+    fn reversers_of(&self, name: &str) -> Result<Vec<TransformInfo>>;
 }
 
 /// A catalog with one recipe name answered from pending (unsaved) text.
@@ -103,6 +110,10 @@ impl<'a> PendingOverlay<'a> {
 impl Catalog for PendingOverlay<'_> {
     fn transform(&self, name: &str, version: Option<u32>) -> Result<Option<TransformInfo>> {
         self.inner.transform(name, version)
+    }
+
+    fn reversers_of(&self, name: &str) -> Result<Vec<TransformInfo>> {
+        self.inner.reversers_of(name)
     }
 
     fn recipe(&self, name: &str, version: Option<u32>) -> Result<Option<RecipeSource>> {
@@ -144,6 +155,7 @@ struct MemTransform {
     transform_id: i64,
     name: String,
     scope: TransformScope,
+    reverses: Option<String>,
     current: u32,
     /// `(version, version_id)` pairs.
     versions: Vec<(u32, i64)>,
@@ -151,28 +163,54 @@ struct MemTransform {
 
 #[cfg(test)]
 impl MemCatalog {
-    /// The five seeded builtins, each at version 1, with the seed's ids.
+    /// The five seeded builtins, each at version 1, with the seed's ids and
+    /// `reverses` (enrichment-trim undoes enrichment-injection).
     pub(crate) fn builtins() -> Self {
         let rows = [
-            (1, "flatten", TransformScope::Directory),
-            (2, "pack", TransformScope::Directory),
-            (3, "enrichment-injection", TransformScope::File),
-            (4, "enrichment-trim", TransformScope::File),
-            (5, "context-manifest", TransformScope::Directory),
+            (1, "flatten", TransformScope::Directory, None),
+            (2, "pack", TransformScope::Directory, None),
+            (3, "enrichment-injection", TransformScope::File, None),
+            (
+                4,
+                "enrichment-trim",
+                TransformScope::File,
+                Some("enrichment-injection"),
+            ),
+            (5, "context-manifest", TransformScope::Directory, None),
         ];
         MemCatalog {
             recipes: Vec::new(),
             transforms: rows
                 .into_iter()
-                .map(|(id, name, scope)| MemTransform {
+                .map(|(id, name, scope, reverses)| MemTransform {
                     transform_id: id,
                     name: name.to_string(),
                     scope,
+                    reverses: reverses.map(str::to_string),
                     current: 1,
                     versions: vec![(1, id)],
                 })
                 .collect(),
         }
+    }
+
+    /// Add a transform at version 1 with an optional `reverses`.
+    pub(crate) fn with_transform(
+        mut self,
+        name: &str,
+        scope: TransformScope,
+        reverses: Option<&str>,
+    ) -> Self {
+        let transform_id = self.transforms.len() as i64 + 1;
+        self.transforms.push(MemTransform {
+            transform_id,
+            name: name.to_string(),
+            scope,
+            reverses: reverses.map(str::to_string),
+            current: 1,
+            versions: vec![(1, 100 + transform_id)],
+        });
+        self
     }
 
     /// Replace a transform's versions (adding the transform if it is new).
@@ -197,6 +235,7 @@ impl MemCatalog {
                     transform_id,
                     name: name.to_string(),
                     scope,
+                    reverses: None,
                     current,
                     versions: versions.to_vec(),
                 });
@@ -249,16 +288,32 @@ impl Catalog for MemCatalog {
         let Some(t) = self.transforms.iter().find(|t| t.name == name) else {
             return Ok(None);
         };
-        let wanted = version.unwrap_or(t.current);
-        Ok(t.versions
+        Ok(t.info(version.unwrap_or(t.current)))
+    }
+
+    fn reversers_of(&self, name: &str) -> Result<Vec<TransformInfo>> {
+        Ok(self
+            .transforms
+            .iter()
+            .filter(|t| t.reverses.as_deref() == Some(name))
+            .filter_map(|t| t.info(t.current))
+            .collect())
+    }
+}
+
+#[cfg(test)]
+impl MemTransform {
+    fn info(&self, wanted: u32) -> Option<TransformInfo> {
+        self.versions
             .iter()
             .find(|(v, _)| *v == wanted)
             .map(|&(version, version_id)| TransformInfo {
-                transform_id: t.transform_id,
-                name: t.name.clone(),
-                scope: t.scope,
+                transform_id: self.transform_id,
+                name: self.name.clone(),
+                scope: self.scope,
+                reverses: self.reverses.clone(),
                 version_id,
                 version,
-            }))
+            })
     }
 }
