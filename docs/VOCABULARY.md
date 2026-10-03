@@ -8,6 +8,8 @@ the contract or ADR that governs it.
 
 **ambiguous (flag type)** — A watch match flag where multiple claims disagree on the target; candidate rows carry each binding's opinion. See Watch flow (flag types) in `5_WATCH.md`.
 
+**analysis (repo analysis)** — An on-demand, display-only scan of a registered repo that measures sizes and file counts and compares the stored pattern list against the repo's live `.gitignore` files; it never writes the trie or stored patterns and never feeds export or watch. Shown as the repo icicle (APP-003C). See Ingest rules contract in `2_INGEST.md`. ADR-045.
+
 **arena** — The in-memory trie representation: a `Vec<Node>` with index-based references, cache-friendly and serializable to MessagePack. See Trie contract in `2_INGEST.md`.
 
 **arg_values** — JSON column on `pipeline_bindings` holding the required ARG values and default overrides that complete a recipe for a specific binding. See Binding contract in `3_RECIPES.md`.
@@ -49,6 +51,10 @@ the contract or ADR that governs it.
 **ctx.render** — The transform API method that renders a template through MiniJinja, used by enrichment-injection and context-manifest. See Transform contract in `3_RECIPES.md`.
 
 **curation** — A field on `transforms` and `templates` distinguishing `builtin` (protected from deletion, upgradable) from `custom` (user-created, deletable). See Transform contract in `3_RECIPES.md`. ADR-036.
+
+**cut** — The first excluded path on a branch of a walk: a file or directory matched by a pattern; nothing below a cut directory is walked, because a file under an excluded directory cannot be re-included. See Ingest rules contract in `2_INGEST.md`. ADR-045.
+
+**cut classification** — The four states analysis assigns each path from the stored patterns, the live `.gitignore` files, and trie presence: included (neither cuts it), ingest only (stored patterns cut it, `.gitignore` does not), repo only (ingested although `.gitignore` ignores it), and both. See ADR-045.
 
 **DEPTH_TOLERANCE** — The maximum number of missing path levels (file + parent directories) for watch auto-placement, set per-recipe in the `WATCH` block, default 2. See Recipe grammar contract in `3_RECIPES.md`. ADR-034.
 

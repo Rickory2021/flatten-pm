@@ -766,3 +766,40 @@ case). Automatic expiry of stale flags (time-based expiry could delete a
 flag the user hasn't reviewed yet). Re-detection on flag dismiss (would
 require re-running detection, which may produce different results if
 pipeline config changed).
+
+
+## Implementation decisions
+
+### ADR-045: Cut detection and analysis read the filesystem live; display only
+
+**Context:** the Repos detail page (APP-003B) shows where stored patterns cut
+the tree, and the repo icicle (APP-003C) sizes what is on disk and compares
+the stored pattern list against the repo's own `.gitignore` files. The trie
+holds only included leaves, so it cannot show what a pattern cuts or how large
+a cut is. ADR-029 removed live `.gitignore` reading from ingest, and
+re-import already reads `.gitignore` again after registration.
+
+**Choice:** two display-only reads. Cut detection reads one directory level
+live and checks each entry against a pattern list (stored or draft); it runs
+only on included directories. Analysis walks the filesystem and reads the
+repo's `.gitignore` files (root and nested, through the same function as
+registration import) when the user runs it. Neither writes the trie, changes
+stored patterns, or feeds export or watch. Global excludes and
+`.git/info/exclude` are not read. Ingest keeps ADR-029 unchanged.
+
+**Rationale:** the stored list stays the source of truth for ingest. Analysis
+is a diff view: it shows where the stored list and the repo's `.gitignore`
+disagree (ingest only, repo only, both). Reading `.gitignore` live at analysis
+time is what makes drift visible; reading it at ingest would bring back the
+precedence confusion ADR-029 removed. One reading function keeps analysis,
+re-import, and the gitignore diff consistent. Cuts are terminal under
+gitignore semantics (a file under an excluded directory cannot be
+re-included), so a one-level read is exact for an included directory.
+
+See: Ingest rules contract in `2_INGEST.md`, ADR-029.
+
+**Rejected:** trie-only analysis (cannot show cuts or their sizes). Persisting
+cuts in the trie (changes the trie contract for data only the UI reads; stale
+after any draft pattern edit). Reading global excludes and `.git/info/exclude`
+(machine-specific; results would differ per checkout). Feeding analysis
+results back into ingest (reintroduces a live gitignore dependency).
