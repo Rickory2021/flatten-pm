@@ -335,7 +335,7 @@ fn copy(node: Node, colon_on_keyword: bool) -> Result<CopyAst> {
 }
 
 const CHAIN_FORM: &str = "[transform --flag value, ...]";
-const FLAG_FORM: &str = "--flag [value]";
+const FLAG_FORM: &str = "--flag";
 const NAME_FORM: &str = "a transform name matching [A-Za-z0-9][A-Za-z0-9_.-]*";
 const ONLY_FORM: &str = "--only <glob>...";
 const RUN_FORM: &str = "RUN <transform>[@N] [--flag value ...] [--only <glob>...]";
@@ -504,7 +504,9 @@ fn parse_flags(
 
         if allow_only && name == "only" {
             let before = only.len();
-            only.extend(inline);
+            // An empty inline value (`--only=`) is no glob, so it errors
+            // like a bare `--only` with nothing after it.
+            only.extend(inline.filter(|w| !w.segments.is_empty()));
             while let Some(glob) = tokens.get(i).filter(|t| flag_parts(t).is_none()) {
                 only.push(to_word(&glob.segments, glob));
                 i += 1;
@@ -586,12 +588,9 @@ mod tests {
         ParseErrorKind::Syntax { instr, expected }
     }
 
+    use super::{CHAIN_FORM, FLAG_FORM, NAME_FORM, ONLY_FORM, RUN_FORM};
+
     const COPY_FORM: &str = "COPY <src> <dest> AS <key>";
-    const CHAIN_FORM: &str = "[transform --flag value, ...]";
-    const FLAG_FORM: &str = "--flag [value]";
-    const NAME_FORM: &str = "a transform name matching [A-Za-z0-9][A-Za-z0-9_.-]*";
-    const ONLY_FORM: &str = "--only <glob>...";
-    const RUN_FORM: &str = "RUN <transform>[@N] [--flag value ...] [--only <glob>...]";
 
     /// Flags as (name, value-as-written) pairs.
     fn flag_pairs(flags: &[Flag]) -> Vec<(String, String)> {
@@ -634,7 +633,7 @@ mod tests {
         );
     }
 
-    /// Test 19 (C1 rows): known instructions nested in the wrong block.
+    /// Test 19 (C1 and C2 rows): known instructions nested in the wrong block.
     #[test]
     fn misplaced_instructions_error_with_expected_parent() {
         let cases = [
@@ -969,6 +968,20 @@ mod tests {
             }
             other => panic!("expected one RUN, got {other:?}"),
         }
+
+        let quoted = "RUN pack --format \"--x\" --only \"--y\" z";
+        match ast(quoted).items.as_slice() {
+            [Item::Run { flags, only, .. }] => {
+                assert_eq!(
+                    flag_pairs(flags),
+                    pairs(&[("format", "--x")]),
+                    "a quoted --x is a flag value, never a flag"
+                );
+                let globs: Vec<String> = only.iter().map(|w| w.display()).collect();
+                assert_eq!(globs, vec!["--y", "z"], "a quoted --y is an --only glob");
+            }
+            other => panic!("expected one RUN, got {other:?}"),
+        }
     }
 
     /// Test 33 (RUN rows; C4 adds the INVOKE rows): malformed RUN lines.
@@ -981,6 +994,8 @@ mod tests {
             ("RUN", syntax("RUN", RUN_FORM), 1),
             ("RUN pack --only", syntax("RUN", ONLY_FORM), 10),
             ("RUN pack --only a --only", syntax("RUN", ONLY_FORM), 19),
+            ("RUN pack --only=", syntax("RUN", ONLY_FORM), 10),
+            ("RUN flatten:", syntax("RUN", NAME_FORM), 5),
             ("RUN pack extra", syntax("RUN", FLAG_FORM), 10),
             ("RUN \"pack\"", syntax("RUN", NAME_FORM), 5),
             ("RUN pack@0", bad_pin.clone(), 5),

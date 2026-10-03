@@ -228,35 +228,32 @@ fn resolve_chain(
     Ok(out)
 }
 
-/// Look up a transform, current or pinned. An unknown name is
-/// UnknownTransform even when pinned; a known name with a missing version is
-/// TransformVersionNotFound.
+/// Look up a transform, current or pinned. The requested form is tried
+/// first, so a pinned lookup succeeds even when the transform's current
+/// version is unavailable. A miss is then classified: a pinned miss on a
+/// name the catalog knows is TransformVersionNotFound; anything else is
+/// UnknownTransform (an unknown name wins over a missing version).
 fn lookup(
     catalog: &dyn Catalog,
     name: &str,
     pin: Option<u32>,
     pos: Position,
 ) -> Result<TransformInfo> {
-    let Some(current) = catalog.transform(name, None)? else {
-        return Err(parse_err(
-            pos,
-            ParseErrorKind::UnknownTransform {
-                name: name.to_string(),
-            },
-        ));
-    };
-    let Some(version) = pin else {
-        return Ok(current);
-    };
-    catalog.transform(name, Some(version))?.ok_or_else(|| {
-        parse_err(
-            pos,
+    if let Some(info) = catalog.transform(name, pin)? {
+        return Ok(info);
+    }
+    let kind = match pin {
+        Some(version) if catalog.transform(name, None)?.is_some() => {
             ParseErrorKind::TransformVersionNotFound {
                 name: name.to_string(),
                 version,
-            },
-        )
-    })
+            }
+        }
+        _ => ParseErrorKind::UnknownTransform {
+            name: name.to_string(),
+        },
+    };
+    Err(parse_err(pos, kind))
 }
 
 fn require_scope(info: &TransformInfo, expected: TransformScope, pos: Position) -> Result<()> {
@@ -838,6 +835,31 @@ mod tests {
         };
         assert_eq!(version_of("RUN pack"), (2, 21), "unpinned follows current");
         assert_eq!(version_of("RUN pack@1"), (1, 20), "pinned to version 1");
+
+        // The current version is unavailable (3 is not among the versions):
+        // a pinned lookup still resolves; an unpinned one finds nothing.
+        let no_current = MemCatalog::builtins().with_versions(
+            "pack",
+            TransformScope::Directory,
+            3,
+            &[(1, 20), (2, 21)],
+        );
+        let pinned = run_with("RUN pack@1", &ArgInput::Open, &no_current);
+        assert_eq!(
+            runs(&pinned)[0].transform.version,
+            1,
+            "a pin survives an unavailable current version"
+        );
+        match run_err_with("RUN pack", &ArgInput::Open, &no_current) {
+            Error::Parse { kind, .. } => assert_eq!(
+                kind,
+                ParseErrorKind::UnknownTransform {
+                    name: "pack".into()
+                },
+                "no resolvable current version reads as unknown when unpinned"
+            ),
+            other => panic!("expected a parse error, got {other:?}"),
+        }
         match run_err_with("RUN pack@9", &ArgInput::Open, &catalog) {
             Error::Parse { location, kind } => assert_eq!(
                 (kind, location.line, location.col),

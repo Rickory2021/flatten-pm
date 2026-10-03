@@ -99,6 +99,8 @@ impl MemCatalog {
     }
 
     /// Replace a transform's versions (adding the transform if it is new).
+    /// `current` must be one of the versions in `versions`; otherwise the
+    /// unpinned lookup finds no current version.
     pub(crate) fn with_versions(
         mut self,
         name: &str,
@@ -106,21 +108,22 @@ impl MemCatalog {
         current: u32,
         versions: &[(u32, i64)],
     ) -> Self {
-        let next_id = self.transforms.len() as i64 + 1;
-        let entry = MemTransform {
-            transform_id: next_id,
-            name: name.to_string(),
-            scope,
-            current,
-            versions: versions.to_vec(),
-        };
         match self.transforms.iter_mut().find(|t| t.name == name) {
             Some(existing) => {
                 existing.scope = scope;
                 existing.current = current;
                 existing.versions = versions.to_vec();
             }
-            None => self.transforms.push(entry),
+            None => {
+                let transform_id = self.transforms.len() as i64 + 1;
+                self.transforms.push(MemTransform {
+                    transform_id,
+                    name: name.to_string(),
+                    scope,
+                    current,
+                    versions: versions.to_vec(),
+                });
+            }
         }
         self
     }

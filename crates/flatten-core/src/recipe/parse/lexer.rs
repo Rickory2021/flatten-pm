@@ -351,6 +351,7 @@ fn next_token(chars: &[(char, Position)], at: usize, mode: Mode) -> Result<Optio
         return Ok(None);
     };
 
+    let start = i;
     let mut segments = Vec::new();
     let mut bare = String::new();
     while let Some(&(c, here)) = chars.get(i) {
@@ -371,6 +372,12 @@ fn next_token(chars: &[(char, Position)], at: usize, mode: Mode) -> Result<Optio
         }
     }
     flush_bare(&mut bare, &mut segments);
+    // A character that ends a bare run before anything was read (chain
+    // punctuation) starts no token. Returning None keeps a caller's loop
+    // from spinning on a zero-width token.
+    if i == start {
+        return Ok(None);
+    }
     Ok(Some((Token { segments, pos }, i)))
 }
 
@@ -771,6 +778,18 @@ mod tests {
             tokens[5].pos(),
             Position::new(1, 25),
             "quoted bracket position"
+        );
+
+        let at_bracket = ls[0]
+            .rest
+            .iter()
+            .position(|&(c, _)| c == ']')
+            .expect("the line has a ]");
+        assert!(
+            next_token(&ls[0].rest, at_bracket, Mode::Chain)
+                .expect("lexing at ] cannot fail")
+                .is_none(),
+            "chain punctuation starts no token, so next_token never returns a zero-width one"
         );
     }
 

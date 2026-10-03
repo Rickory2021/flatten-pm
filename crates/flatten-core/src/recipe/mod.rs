@@ -39,21 +39,37 @@ pub const SHIPPED_DEFAULT_RECIPE: &str = strip_prefix_const(
 /// The file's directory comment, stripped from the embedded text.
 const SHIPPED_HEADER: &str = "# crates/flatten-core/builtins/recipes/shipped-default.recipe\n";
 
-/// `str::strip_prefix` for const contexts: `text` without a leading
-/// `prefix`, or `text` unchanged when it does not start with `prefix`.
-const fn strip_prefix_const<'a>(text: &'a str, prefix: &str) -> &'a str {
+// Header drift (a missing or edited header line, or a CRLF checkout) would
+// leave the comment in the embedded text. Make that a compile error instead
+// of a silent change to every `recipe new` recipe.
+const _: () = assert!(
+    starts_with_const(SHIPPED_DEFAULT_RECIPE, "ARG repo\n"),
+    "shipped-default.recipe: the embedded text must start with `ARG repo` (check the line-1 header and LF line endings)"
+);
+
+/// `str::starts_with` for const contexts.
+const fn starts_with_const(text: &str, prefix: &str) -> bool {
     let (text_bytes, prefix_bytes) = (text.as_bytes(), prefix.as_bytes());
     if text_bytes.len() < prefix_bytes.len() {
-        return text;
+        return false;
     }
     let mut i = 0;
     while i < prefix_bytes.len() {
         if text_bytes[i] != prefix_bytes[i] {
-            return text;
+            return false;
         }
         i += 1;
     }
-    let (_, rest) = text_bytes.split_at(prefix_bytes.len());
+    true
+}
+
+/// `str::strip_prefix` for const contexts: `text` without a leading
+/// `prefix`, or `text` unchanged when it does not start with `prefix`.
+const fn strip_prefix_const<'a>(text: &'a str, prefix: &str) -> &'a str {
+    if !starts_with_const(text, prefix) {
+        return text;
+    }
+    let (_, rest) = text.as_bytes().split_at(prefix.len());
     match std::str::from_utf8(rest) {
         Ok(rest) => rest,
         Err(_) => text,
