@@ -76,9 +76,8 @@ pub(crate) struct ChainElem {
 }
 
 /// A `--name value` flag. A bare `--name` has the value `true`.
-// SPEC-DEVIATION(EX-001): the spec's Flag also has `pos`. Nothing reads it
-// (errors point at the element or the value word, which has its own pos),
-// so it is left out per plan rule 1.
+// No `pos`: errors point at the element or at the value word, which has its
+// own position, so a flag position would be unread.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Flag {
     pub name: String,

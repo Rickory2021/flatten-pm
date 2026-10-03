@@ -15,7 +15,7 @@
 // Versioning (docs/design/6_VERSIONING.md, ADR-037): a save inserts version
 // MAX(version) + 1 over every version row, soft-deleted ones included, and
 // moves `current_version_id`. Each pointer move bumps the change counter in
-// the same transaction (DA-004 [D10]). An edit whose text is byte-identical
+// the same transaction (DA-004). An edit whose text is byte-identical
 // to the current version writes nothing and does not analyze. Rollback moves
 // the pointer first, then checks the target: an error becomes `problem`
 // (export and show will hit it) and never fails the call; a clean check

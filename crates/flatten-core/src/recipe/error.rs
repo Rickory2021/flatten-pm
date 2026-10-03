@@ -5,7 +5,7 @@
 // Every parse error carries a Location (line and column). Display forms
 // are load-bearing: the CLI prints them, and `line:col:` is what the EX-001
 // verification checks. All location text goes through `fmt_origin` so error
-// and (later) warning lines cannot drift apart.
+// and warning lines cannot drift apart.
 // See: Error Model in docs/design/1_INFRASTRUCTURE.md.
 
 use std::fmt;
@@ -17,10 +17,9 @@ use super::types::Position;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A lexical, structural, or semantic error at a source location.
-    // SPEC-DEVIATION(EX-001): the spec has `location: Location`. It is boxed
-    // because Location grew INVOKE context (`via`, invoked names) and the
-    // unboxed error passed clippy's result_large_err limit (128 bytes). Field
-    // access (`location.line`) reads the same through the box.
+    // The location is boxed: with its INVOKE context (`via`, invoked names)
+    // an unboxed error passes clippy's result_large_err limit (128 bytes).
+    // Field access (`location.line`) reads the same through the box.
     #[error("{location}: {kind}")]
     Parse {
         /// Where the error points.
@@ -184,7 +183,7 @@ pub(crate) fn fmt_origin(
     }
 }
 
-/// What a path failed on. See the path normalization table in the EX-001 spec.
+/// What a path failed on. See Paths and COPY shapes in docs/RECIPE.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PathIssue {
     /// The path is empty after substitution.
@@ -450,7 +449,7 @@ mod tests {
     use super::*;
     use crate::recipe::lint::{LintCode, LintWarning};
 
-    /// Test 101 (C1, C4, and C5 rows): errors, locations, and warnings share one origin format.
+    /// Test 101: errors, locations, and warnings share one origin format.
     #[test]
     fn error_warning_and_location_display_formats() {
         let err = parse_err(

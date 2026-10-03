@@ -197,7 +197,7 @@ mod tests {
         }
     }
 
-    /// Test 72: every row of the spec's canonical-shape examples table.
+    /// Test 72: every row of the canonical-shape examples table in docs/RECIPE.md.
     #[test]
     fn copy_shape_canonicalizes_prefix_pairs() {
         let cases = [

@@ -11,7 +11,7 @@
 //
 // A token is a run of segments with no whitespace between them:
 //   bare text, "quoted text" (escapes \" \\ \n \t), and ${NAME} variables.
-// See the Lexical rules section of the EX-001 spec and docs/RECIPE.md.
+// See Lexical rules in docs/RECIPE.md.
 
 use super::path::is_arg_name;
 use crate::recipe::error::{ParseErrorKind, Result, parse_err};

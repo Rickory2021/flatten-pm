@@ -42,8 +42,6 @@
 // root wins a key (ties: first expanded), and each replaced invoked entry is
 // an L007 warning. Every winning key must name a COPY block; open mode skips
 // that check while the key, or any COPY key, is still symbolic.
-//
-// Every instruction is implemented (plan chunk C5).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
@@ -149,12 +147,12 @@ struct Binding {
 
 /// One recipe's resolution state: ARG values, the default chain, and where
 /// its positions and errors point.
-// SPEC-DEVIATION(EX-001): the spec's frame also holds a `symbolic` flag per
-// value and a `declared` list. Neither is needed. Open-mode symbolic
-// detection scans for `${` (see the module header; decided in C3). INVOKE
-// binding step 2 reads the caller's `env`, which holds exactly the ARGs
-// declared by that point, and step 3 walks the invoked recipe's own ARG items
-// in file order (decided in C4). `recipe.args` carries the root's ARG order.
+// Values are plain strings. Open-mode symbolic detection scans for `${` (see
+// the module header), so no per-value flag is kept. INVOKE binding step 2
+// reads the caller's `env`, which holds exactly the ARGs declared by that
+// point, and step 3 walks the invoked recipe's own ARG items in file order,
+// so no separate declaration list is kept. `recipe.args` carries the root's
+// ARG order.
 struct Frame {
     env: HashMap<String, String>,
     /// The COPY_DEFAULT_WITH in effect: empty until declared; a later
@@ -474,11 +472,10 @@ impl Expander<'_> {
                 },
             ));
         }
-        // SPEC-DEVIATION(EX-001): the default is substituted even when a
-        // bound value overrides it, so an undeclared reference in a default
-        // fails in both modes. That keeps the open-mode invariant: open mode
-        // never rejects what bound mode accepts. The spec wording follows at
-        // reconcile.
+        // The default is substituted even when a bound value overrides it, so
+        // an undeclared reference in a default fails in both modes. That keeps
+        // the open-mode invariant: open mode never rejects what bound mode
+        // accepts.
         let default_value = default.map(|word| substitute(word, frame)).transpose()?;
 
         let value = match &frame.binding {
@@ -707,12 +704,11 @@ impl Expander<'_> {
         let (src, dest) = canonical_copy_shape(src, dest);
 
         let key = substitute(&copy.key, frame)?;
-        // SPEC-DEVIATION(EX-001): the spec says open mode checks only the
-        // literal parts of a symbolic key. This checks the full substituted
-        // text, which is equivalent (symbolic `${name}` text is never empty
-        // and has no control characters) and also accepts a fully symbolic
-        // key such as `AS ${k}`, which a literal-parts-only check would
-        // wrongly reject as empty.
+        // The key check runs on the full substituted text, symbolic parts
+        // included. That is safe in open mode (symbolic `${name}` text is
+        // never empty and has no control characters), and it accepts a fully
+        // symbolic key such as `AS ${k}`, which a check of the literal parts
+        // alone would wrongly reject as empty.
         if let Err(reason) = check_key(&key) {
             return Err(frame.err(copy.key.pos, ParseErrorKind::InvalidKey { key, reason }));
         }
@@ -1020,7 +1016,7 @@ mod tests {
         chain.iter().map(|t| t.name.as_str()).collect()
     }
 
-    /// Test 39 (C1 to C5 rows): every substitutable argument substitutes.
+    /// Test 39: every substitutable argument substitutes.
     #[test]
     fn substitutes_in_every_target() {
         let source = "ARG repo\nARG sub\nARG set\nARG fmt\n\
@@ -1144,7 +1140,7 @@ mod tests {
         }
     }
 
-    /// Test 42 (C1 and C3 rows): open mode keeps required ARGs symbolic and checks defaults as final.
+    /// Test 42: open mode keeps required ARGs symbolic and checks defaults as final.
     #[test]
     fn open_mode_keeps_unbound_symbolic_and_checks_defaults() {
         let recipe = run(
@@ -1249,7 +1245,7 @@ mod tests {
         }
     }
 
-    /// Test 46 (C1 and C3 rows): values that open mode could not see are checked once bound.
+    /// Test 46: values that open mode could not see are checked once bound.
     #[test]
     fn bound_mode_revalidates_substituted_values() {
         let cases = [
@@ -1482,7 +1478,7 @@ mod tests {
         );
     }
 
-    /// Test 47 (C2 and C3 rows): COPY_DEFAULT_WITH is sequential; OVERRIDE_WITH replaces it per COPY.
+    /// Test 47: COPY_DEFAULT_WITH is sequential; OVERRIDE_WITH replaces it per COPY.
     #[test]
     fn chain_selection_default_override_and_empty() {
         let source = "SOURCE r:\n  COPY a/ a/ AS a\n\
@@ -1548,7 +1544,7 @@ mod tests {
         );
     }
 
-    /// Test 48 (C2, C3, and C5 rows): COPY and OVERRIDE chains need file transforms; RUN needs a directory transform.
+    /// Test 48: COPY and OVERRIDE chains need file transforms; RUN needs a directory transform.
     #[test]
     fn scope_mismatch_errors() {
         let wrong = |name: &str, expected, found| ParseErrorKind::WrongScope {

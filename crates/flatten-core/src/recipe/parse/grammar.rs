@@ -21,8 +21,6 @@
 //
 // WATCH (once per recipe) holds an optional DEPTH_TOLERANCE and an optional
 // OVERRIDE block of `<key> <chain>` entries.
-//
-// All instructions are implemented (plan chunk C5).
 
 use std::collections::HashSet;
 
@@ -223,10 +221,9 @@ fn block_args(
 ) -> Result<(Vec<Token>, bool)> {
     let mut args = line.words()?;
     if colon_on_keyword {
-        // SPEC-DEVIATION(EX-001): `SOURCE: r` reports Syntax (a malformed
-        // SOURCE), not the UnknownInstruction the spec's colon rule implies
-        // (`SOURCE:` is only a keyword when nothing follows it). Syntax names
-        // the instruction the author meant.
+        // `SOURCE: r` reports Syntax (a malformed SOURCE) rather than an
+        // unknown instruction, even though `SOURCE:` is only a keyword when
+        // nothing follows it: Syntax names the instruction the author meant.
         if !args.is_empty() {
             return Err(parse_err(line.pos, malformed));
         }
@@ -909,7 +906,7 @@ mod tests {
         );
     }
 
-    /// Test 19 (C1 to C5 rows): known instructions in the wrong block.
+    /// Test 19: known instructions in the wrong block.
     #[test]
     fn misplaced_instructions_error_with_expected_parent() {
         let not_in = |instr, parent| ParseErrorKind::NotAllowedIn { instr, parent };
@@ -1001,7 +998,7 @@ mod tests {
         }
     }
 
-    /// Test 28 (C3 and C5 rows): duplicate block members.
+    /// Test 28: duplicate block members.
     #[test]
     fn duplicate_block_members_error() {
         let cases = [

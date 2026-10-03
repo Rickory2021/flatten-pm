@@ -7,7 +7,7 @@ pub mod writer;
 use error::{Error, Result};
 use rusqlite::{Connection, OpenFlags};
 
-/// Increment the change counter (DA-004 [D10]). Every pointer move calls this
+/// Increment the change counter (DA-004). Every pointer move calls this
 /// in the same transaction as the move. Errors if the counter row is
 /// missing.
 pub(crate) fn bump_change_counter(conn: &Connection) -> Result<()> {

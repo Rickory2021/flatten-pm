@@ -78,7 +78,7 @@ pub struct TransformInfo {
 /// A recipe's text at a resolved version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecipeSource {
-    /// `build_recipes.id`; `None` only for pending text with no row yet.
+    /// `build_recipes.id`; `None` for pending (unsaved) text.
     pub recipe_id: Option<i64>,
     /// The recipe name.
     pub name: String,
@@ -187,8 +187,8 @@ impl Catalog for DbCatalog<'_> {
 }
 
 /// A catalog with one recipe name answered from pending (unsaved) text.
-// SPEC-DEVIATION(EX-001): the spec gives `name: String`. It is borrowed: the
-// overlay lives only inside `analyze`, next to the name it borrows.
+// The name is borrowed: the overlay lives only inside `analyze`, next to the
+// name it borrows.
 pub(crate) struct PendingOverlay<'a> {
     inner: &'a dyn Catalog,
     name: &'a str,
@@ -219,9 +219,8 @@ impl Catalog for PendingOverlay<'_> {
         if name != self.name || version.is_some() {
             return self.inner.recipe(name, version);
         }
-        let recipe_id = self.inner.recipe(name, None)?.and_then(|r| r.recipe_id);
         Ok(Some(RecipeSource {
-            recipe_id,
+            recipe_id: None,
             name: name.to_string(),
             version_id: None,
             version: None,

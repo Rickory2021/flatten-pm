@@ -6,12 +6,9 @@
 //   source text -> lexer -> grammar -> Ast -> resolve -> Recipe
 // Everything under `parse/` is crate-private. The output types in
 // `types.rs` are the parse output contract (docs/design/3_RECIPES.md).
-// Transform lookups go through the `Catalog` trait (`catalog.rs`).
-//
-// Implemented so far (plan chunk C8): every instruction (ARG,
-// COPY_DEFAULT_WITH, SOURCE, COPY with EXCLUDE and OVERRIDE_WITH, RUN,
-// INVOKE, WATCH); resolver warnings (L006, L007); the lint pass (L001 to
-// L005, L008); the SQLite catalog; and the recipe store (`store`).
+// Transform and recipe lookups go through the `Catalog` trait
+// (`catalog.rs`); lint is `lint.rs`; versioned storage is `store.rs`. The
+// language itself is documented in docs/RECIPE.md.
 
 mod catalog;
 mod error;
@@ -44,10 +41,9 @@ pub const SHIPPED_DEFAULT_RECIPE: &str = strip_prefix_const(
     SHIPPED_HEADER,
 );
 
-// SPEC-DEVIATION(EX-001): the spec says the file holds exactly the shipped
-// text. It also carries a directory comment on line 1 so the flatten-sync
-// watcher can route it; the comment is stripped here, so the embedded text
-// (and every `recipe new` recipe) is still exactly the spec's text.
+// The file carries a directory comment on line 1 so the flatten-sync watcher
+// can route it. The comment is stripped here, so the embedded text (and every
+// `recipe new` recipe) is exactly the shipped text in 3_RECIPES.md.
 /// The file's directory comment, stripped from the embedded text.
 const SHIPPED_HEADER: &str = "# crates/flatten-core/builtins/recipes/shipped-default.recipe\n";
 
