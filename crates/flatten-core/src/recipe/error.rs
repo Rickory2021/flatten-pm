@@ -240,7 +240,8 @@ pub enum ParseErrorKind {
         expected: &'static str,
     },
     /// A repeated member: a flag within one transform, a second
-    /// OVERRIDE_WITH in a COPY, or a repeated INVOKE assignment.
+    /// OVERRIDE_WITH in a COPY, a repeated INVOKE assignment, a second
+    /// WATCH, DEPTH_TOLERANCE, or OVERRIDE, or a repeated OVERRIDE key.
     #[error("duplicate {what}")]
     Duplicate {
         /// What repeated, e.g. `flag --format`.
@@ -259,9 +260,10 @@ pub enum ParseErrorKind {
     #[error("version pins (@N) are only allowed on INVOKE and RUN")]
     PinNotAllowed,
     /// A number that does not parse, or is out of range.
-    #[error("invalid {what}: expected a decimal number >= 1")]
+    #[error("invalid {what}: expected a decimal number")]
     InvalidNumber {
-        /// Which number, e.g. `version pin`.
+        /// Which number, with its bound when it has one: `version pin (>= 1)`
+        /// or `DEPTH_TOLERANCE`.
         what: &'static str,
     },
     /// An ARG name outside `[A-Za-z_][A-Za-z0-9_]*`.
@@ -341,6 +343,12 @@ pub enum ParseErrorKind {
         /// The transform's scope.
         found: TransformScope,
     },
+    /// A WATCH OVERRIDE entry for a key no COPY block defines.
+    #[error("WATCH OVERRIDE names {key:?}, but no COPY block has that key")]
+    UnknownOverrideKey {
+        /// The key after substitution.
+        key: String,
+    },
     /// An INVOKE target the catalog does not know.
     #[error("unknown recipe {name}")]
     UnknownRecipe {
@@ -405,8 +413,9 @@ pub enum ParseErrorKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recipe::lint::{LintCode, LintWarning};
 
-    /// Test 101 (C1 and C4 rows): errors and locations display as `origin: message`.
+    /// Test 101 (C1, C4, and C5 rows): errors, locations, and warnings share one origin format.
     #[test]
     fn error_warning_and_location_display_formats() {
         let err = parse_err(
@@ -493,6 +502,33 @@ mod tests {
             invoked_err.to_string(),
             "leaf@1 2:1 (via INVOKE at invoke 7:1 -> base@2 4:1): unknown instruction 'COPIE'",
             "an invoked error line starts with its location"
+        );
+
+        let root_warning = LintWarning {
+            code: LintCode::L007,
+            message: "replaced".into(),
+            position: Position::new(3, 3),
+            recipe: None,
+        };
+        assert_eq!(
+            root_warning.to_string(),
+            "L007 3:3: replaced",
+            "a root warning displays as code line:col: message"
+        );
+        let invoked_warning = LintWarning {
+            code: LintCode::L006,
+            message: "ignored".into(),
+            position: Position {
+                line: 3,
+                col: 1,
+                recipe_version_id: Some(12),
+            },
+            recipe: Some("base@2".into()),
+        };
+        assert_eq!(
+            invoked_warning.to_string(),
+            "L006 base@2 3:1: ignored",
+            "an invoked warning names its recipe through the same formatter"
         );
 
         let unknown = Error::UnknownArg { name: "zz".into() };

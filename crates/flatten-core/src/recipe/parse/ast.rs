@@ -42,6 +42,12 @@ pub(crate) enum Item {
         assigns: Vec<(String, Word, Position)>,
         pos: Position,
     },
+    /// `WATCH:` with its optional DEPTH_TOLERANCE and OVERRIDE block.
+    Watch {
+        depth: Option<(u32, Position)>,
+        overrides: Vec<OverrideAst>,
+        pos: Position,
+    },
     /// `RUN <transform>[@N] [flags] [--only <glob> ...]`.
     Run {
         name: String,
@@ -50,6 +56,14 @@ pub(crate) enum Item {
         only: Vec<Word>,
         pos: Position,
     },
+}
+
+/// One `<key> <chain>` entry in a WATCH OVERRIDE block.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OverrideAst {
+    pub key: Word,
+    pub chain: Vec<ChainElem>,
+    pub pos: Position,
 }
 
 /// One element of a transform chain: `name --flag value ...`.

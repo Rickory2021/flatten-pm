@@ -19,13 +19,14 @@
 // INVOKE takes a recipe name, an optional `@N` pin, and `name=value`
 // assignments for the invoked recipe's ARGs.
 //
-// Implemented so far (plan chunk C4): ARG, COPY_DEFAULT_WITH, SOURCE, COPY
-// with EXCLUDE and OVERRIDE_WITH, RUN, INVOKE. Any other first token is an
-// unknown instruction until its chunk lands.
+// WATCH (once per recipe) holds an optional DEPTH_TOLERANCE and an optional
+// OVERRIDE block of `<key> <chain>` entries.
+//
+// All instructions are implemented (plan chunk C5).
 
 use std::collections::HashSet;
 
-use super::ast::{Ast, ChainElem, CopyAst, ExcludeAst, Flag, Item, Segment, Word};
+use super::ast::{Ast, ChainElem, CopyAst, ExcludeAst, Flag, Item, OverrideAst, Segment, Word};
 use super::lexer::{ChainToken, LogicalLine, RawSegment, Token};
 use super::path::{is_arg_name, is_flag_name, is_name};
 use crate::recipe::error::{Error, ParseErrorKind, Result, parse_err};
@@ -41,15 +42,31 @@ const KEYWORDS: &[&str] = &[
     "EXCLUDE",
     "OVERRIDE_WITH",
     "INVOKE",
+    "WATCH",
+    "DEPTH_TOLERANCE",
+    "OVERRIDE",
 ];
 /// Keywords that open a block and consume a trailing `:`.
-const BLOCK_KEYWORDS: &[&str] = &["SOURCE", "COPY"];
+const BLOCK_KEYWORDS: &[&str] = &["SOURCE", "COPY", "WATCH", "OVERRIDE"];
 
 /// Build the Ast from logical lines.
 pub(crate) fn build(lines: Vec<LogicalLine>) -> Result<Ast> {
     let mut items = Vec::new();
+    let mut watch_seen = false;
     for node in tree(lines)? {
-        items.push(top_level(node)?);
+        let item = top_level(node)?;
+        if let Item::Watch { pos, .. } = &item {
+            if watch_seen {
+                return Err(parse_err(
+                    *pos,
+                    ParseErrorKind::Duplicate {
+                        what: "WATCH".to_string(),
+                    },
+                ));
+            }
+            watch_seen = true;
+        }
+        items.push(item);
     }
     Ok(Ast { items })
 }
@@ -166,6 +183,14 @@ fn top_level(node: Node) -> Result<Item> {
             no_children(&node)?;
             invoke(&node.line)
         }
+        Some(("WATCH", colon)) => watch(node, colon),
+        Some((instr @ ("DEPTH_TOLERANCE" | "OVERRIDE"), _)) => Err(parse_err(
+            node.line.pos,
+            ParseErrorKind::OutsideBlock {
+                instr,
+                expected: "WATCH",
+            },
+        )),
         Some(("COPY", _)) => Err(parse_err(node.line.pos, ParseErrorKind::CopyOutsideSource)),
         Some((instr @ ("EXCLUDE" | "OVERRIDE_WITH"), _)) => Err(parse_err(
             node.line.pos,
@@ -387,6 +412,111 @@ fn copy(node: Node, colon_on_keyword: bool) -> Result<CopyAst> {
 }
 
 const EXCLUDE_FORM: &str = "EXCLUDE <pattern>... (or --binary)";
+const WATCH_SYNTAX: ParseErrorKind = ParseErrorKind::Syntax {
+    instr: "WATCH",
+    expected: "WATCH:",
+};
+const OVERRIDE_SYNTAX: ParseErrorKind = ParseErrorKind::Syntax {
+    instr: "OVERRIDE",
+    expected: "OVERRIDE:",
+};
+const DEPTH_FORM: &str = "DEPTH_TOLERANCE <n>";
+
+/// `WATCH:` with at most one DEPTH_TOLERANCE and at most one OVERRIDE block.
+fn watch(node: Node, colon_on_keyword: bool) -> Result<Item> {
+    let (args, colon) = block_args(&node.line, colon_on_keyword, WATCH_SYNTAX)?;
+    if !args.is_empty() {
+        return Err(parse_err(node.line.pos, WATCH_SYNTAX));
+    }
+    require_colon(&node, colon, "WATCH")?;
+
+    let mut depth = None;
+    let mut overrides = None;
+    for child in &node.children {
+        match keyword_of(&child.line.first) {
+            Some(("DEPTH_TOLERANCE", _)) => {
+                no_children(child)?;
+                if depth.is_some() {
+                    return Err(duplicate(child, "DEPTH_TOLERANCE"));
+                }
+                depth = Some((depth_tolerance(&child.line)?, child.line.pos));
+            }
+            Some(("OVERRIDE", colon)) => {
+                if overrides.is_some() {
+                    return Err(duplicate(child, "OVERRIDE"));
+                }
+                overrides = Some(override_block(child, colon)?);
+            }
+            _ => return Err(misplaced(child, "WATCH")),
+        }
+    }
+    Ok(Item::Watch {
+        depth,
+        overrides: overrides.unwrap_or_default(),
+        pos: node.line.pos,
+    })
+}
+
+fn duplicate(node: &Node, what: &str) -> Error {
+    parse_err(
+        node.line.pos,
+        ParseErrorKind::Duplicate {
+            what: what.to_string(),
+        },
+    )
+}
+
+/// `DEPTH_TOLERANCE <n>`: one bare decimal `u32`; no substitution, no lower
+/// bound.
+fn depth_tolerance(line: &LogicalLine) -> Result<u32> {
+    let args = line.words()?;
+    let [token] = args.as_slice() else {
+        return Err(syntax(line.pos, "DEPTH_TOLERANCE", DEPTH_FORM));
+    };
+    token
+        .bare_text()
+        .filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()))
+        .and_then(|t| t.parse::<u32>().ok())
+        .ok_or_else(|| {
+            parse_err(
+                token.pos,
+                ParseErrorKind::InvalidNumber {
+                    what: "DEPTH_TOLERANCE",
+                },
+            )
+        })
+}
+
+/// `OVERRIDE:` followed by `<key> <chain>` lines. The key is one word-mode
+/// token (it may hold variables); the rest of the line is a chain.
+fn override_block(node: &Node, colon_on_keyword: bool) -> Result<Vec<OverrideAst>> {
+    let (args, colon) = block_args(&node.line, colon_on_keyword, OVERRIDE_SYNTAX)?;
+    if !args.is_empty() {
+        return Err(parse_err(node.line.pos, OVERRIDE_SYNTAX));
+    }
+    require_colon(node, colon, "OVERRIDE")?;
+
+    let mut entries: Vec<OverrideAst> = Vec::with_capacity(node.children.len());
+    for child in &node.children {
+        no_children(child)?;
+        let key = to_word(&child.line.first.segments, &child.line.first);
+        if entries.iter().any(|e| e.key.segments == key.segments) {
+            return Err(parse_err(
+                child.line.pos,
+                ParseErrorKind::Duplicate {
+                    what: format!("OVERRIDE key {}", key.display()),
+                },
+            ));
+        }
+        let chain = chain(&child.line, "OVERRIDE")?;
+        entries.push(OverrideAst {
+            key,
+            chain,
+            pos: child.line.pos,
+        });
+    }
+    Ok(entries)
+}
 
 /// `EXCLUDE <pattern>...`: each token is a gitignore pattern, except a fully
 /// bare `--binary` (the marker) and any other fully bare `--` token (an
@@ -577,7 +707,7 @@ fn pin_number(pin: Option<String>, token: &Token) -> Result<Option<u32>> {
         parse_err(
             token.pos,
             ParseErrorKind::InvalidNumber {
-                what: "version pin",
+                what: "version pin (>= 1)",
             },
         )
     })
@@ -779,13 +909,17 @@ mod tests {
         );
     }
 
-    /// Test 19 (C1, C2, and C3 rows): known instructions in the wrong block.
+    /// Test 19 (C1 to C5 rows): known instructions in the wrong block.
     #[test]
     fn misplaced_instructions_error_with_expected_parent() {
         let not_in = |instr, parent| ParseErrorKind::NotAllowedIn { instr, parent };
         let outside = |instr| ParseErrorKind::OutsideBlock {
             instr,
             expected: "COPY",
+        };
+        let outside_watch = |instr| ParseErrorKind::OutsideBlock {
+            instr,
+            expected: "WATCH",
         };
         let cases = [
             ("SOURCE r:\n  ARG a", not_in("ARG", "SOURCE"), 2, 3),
@@ -810,6 +944,9 @@ mod tests {
                 2,
                 3,
             ),
+            ("DEPTH_TOLERANCE 2", outside_watch("DEPTH_TOLERANCE"), 1, 1),
+            ("OVERRIDE:\n  k []", outside_watch("OVERRIDE"), 1, 1),
+            ("WATCH:\n  EXCLUDE a", not_in("EXCLUDE", "WATCH"), 2, 3),
         ];
         for (source, kind, line, col) in cases {
             assert_eq!(
@@ -864,15 +1001,31 @@ mod tests {
         }
     }
 
-    /// Test 28 (C3 row; C5 adds the WATCH rows): duplicate block members.
+    /// Test 28 (C3 and C5 rows): duplicate block members.
     #[test]
     fn duplicate_block_members_error() {
-        let cases = [(
-            "SOURCE r:\n  COPY . x/ AS k:\n    OVERRIDE_WITH []\n    OVERRIDE_WITH [enrichment-trim]",
-            "OVERRIDE_WITH",
-            4,
-            5,
-        )];
+        let cases = [
+            (
+                "SOURCE r:\n  COPY . x/ AS k:\n    OVERRIDE_WITH []\n    OVERRIDE_WITH [enrichment-trim]",
+                "OVERRIDE_WITH",
+                4,
+                5,
+            ),
+            ("WATCH:\nWATCH:", "WATCH", 2, 1),
+            (
+                "WATCH:\n  DEPTH_TOLERANCE 1\n  DEPTH_TOLERANCE 2",
+                "DEPTH_TOLERANCE",
+                3,
+                3,
+            ),
+            ("WATCH:\n  OVERRIDE:\n  OVERRIDE:", "OVERRIDE", 3, 3),
+            (
+                "WATCH:\n  OVERRIDE:\n    k []\n    k [enrichment-trim]",
+                "OVERRIDE key k",
+                4,
+                5,
+            ),
+        ];
         for (source, what, line, col) in cases {
             assert_eq!(
                 parse_error(source),
@@ -1263,7 +1416,7 @@ mod tests {
     #[test]
     fn run_and_invoke_malformed_errors() {
         let bad_pin = ParseErrorKind::InvalidNumber {
-            what: "version pin",
+            what: "version pin (>= 1)",
         };
         let cases = [
             ("RUN", syntax("RUN", RUN_FORM), 1),
@@ -1295,7 +1448,7 @@ mod tests {
             (
                 "INVOKE base@0",
                 ParseErrorKind::InvalidNumber {
-                    what: "version pin",
+                    what: "version pin (>= 1)",
                 },
                 8,
             ),
@@ -1357,6 +1510,116 @@ mod tests {
                 assert!(assigns.is_empty(), "no assignments");
             }
             other => panic!("expected one INVOKE, got {other:?}"),
+        }
+    }
+
+    /// Test 17: the full nesting: SOURCE > COPY > EXCLUDE and OVERRIDE_WITH,
+    /// WATCH > DEPTH_TOLERANCE and OVERRIDE entries.
+    #[test]
+    fn basic_recipe_builds_expected_ast() {
+        let source = "ARG repo\n\
+                      COPY_DEFAULT_WITH [enrichment-injection --template-set default]\n\
+                      SOURCE ${repo}:\n\
+                      \x20 COPY . ${repo}/ AS all-files:\n\
+                      \x20   EXCLUDE *.log node_modules/ --binary\n\
+                      \x20 COPY docs/ ${repo}/docs/ AS docs-files:\n\
+                      \x20   OVERRIDE_WITH [enrichment-injection --template-set default]\n\
+                      RUN flatten\n\
+                      RUN context-manifest\n\
+                      WATCH:\n\
+                      \x20 DEPTH_TOLERANCE 2\n\
+                      \x20 OVERRIDE:\n\
+                      \x20   docs-files [enrichment-trim]";
+        let items = ast(source).items;
+        let kinds: Vec<&str> = items
+            .iter()
+            .map(|i| match i {
+                Item::Arg { .. } => "ARG",
+                Item::CopyDefaultWith { .. } => "COPY_DEFAULT_WITH",
+                Item::Source { .. } => "SOURCE",
+                Item::Run { .. } => "RUN",
+                Item::Invoke { .. } => "INVOKE",
+                Item::Watch { .. } => "WATCH",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["ARG", "COPY_DEFAULT_WITH", "SOURCE", "RUN", "RUN", "WATCH"],
+            "top-level items in file order"
+        );
+        match &items[2] {
+            Item::Source { copies, .. } => {
+                assert_eq!(copies.len(), 2, "two COPY blocks");
+                assert_eq!(
+                    pattern_texts(&copies[0].excludes),
+                    vec!["*.log", "node_modules/", "<binary>"],
+                    "first COPY's excludes"
+                );
+                assert!(
+                    copies[0].override_with.is_none(),
+                    "first COPY has no override"
+                );
+                let chain = copies[1]
+                    .override_with
+                    .as_ref()
+                    .expect("second COPY has OVERRIDE_WITH");
+                assert_eq!(chain[0].name, "enrichment-injection", "override chain");
+            }
+            other => panic!("expected SOURCE, got {other:?}"),
+        }
+        match &items[5] {
+            Item::Watch {
+                depth, overrides, ..
+            } => {
+                assert_eq!(
+                    *depth,
+                    Some((2, Position::new(11, 3))),
+                    "DEPTH_TOLERANCE value and position"
+                );
+                assert_eq!(overrides.len(), 1, "one OVERRIDE entry");
+                assert_eq!(overrides[0].key.segments, lit("docs-files"), "entry key");
+                assert_eq!(overrides[0].chain[0].name, "enrichment-trim", "entry chain");
+            }
+            other => panic!("expected WATCH, got {other:?}"),
+        }
+    }
+
+    /// Test 29: DEPTH_TOLERANCE takes one bare decimal u32 (0 is allowed).
+    #[test]
+    fn depth_tolerance_non_numeric_errors() {
+        let bad = ParseErrorKind::InvalidNumber {
+            what: "DEPTH_TOLERANCE",
+        };
+        let cases = [
+            ("WATCH:\n  DEPTH_TOLERANCE x", bad.clone(), 2, 19),
+            ("WATCH:\n  DEPTH_TOLERANCE -1", bad.clone(), 2, 19),
+            ("WATCH:\n  DEPTH_TOLERANCE 4294967296", bad.clone(), 2, 19),
+            ("WATCH:\n  DEPTH_TOLERANCE ${d}", bad, 2, 19),
+            (
+                "WATCH:\n  DEPTH_TOLERANCE",
+                syntax("DEPTH_TOLERANCE", "DEPTH_TOLERANCE <n>"),
+                2,
+                3,
+            ),
+            (
+                "WATCH:\n  DEPTH_TOLERANCE 1 2",
+                syntax("DEPTH_TOLERANCE", "DEPTH_TOLERANCE <n>"),
+                2,
+                3,
+            ),
+        ];
+        for (source, kind, line, col) in cases {
+            assert_eq!(
+                parse_error(source),
+                (kind, line, col),
+                "DEPTH_TOLERANCE error in {source:?}"
+            );
+        }
+        match ast("WATCH:\n  DEPTH_TOLERANCE 0").items.as_slice() {
+            [Item::Watch { depth, .. }] => {
+                assert_eq!(depth.map(|(d, _)| d), Some(0), "zero is a valid tolerance")
+            }
+            other => panic!("expected WATCH, got {other:?}"),
         }
     }
 }

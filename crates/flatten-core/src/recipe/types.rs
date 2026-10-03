@@ -38,11 +38,33 @@ pub struct Recipe {
     pub args: Vec<Arg>,
     /// Instructions in execution (file) order.
     pub instructions: Vec<Instruction>,
+    /// The WATCH configuration watch will record for this recipe.
+    pub watch_config: WatchConfig,
     /// Every recipe version expanded through INVOKE, nested ones included,
     /// in first-seen order and without duplicates.
     pub invoked_versions: Vec<InvokedVersion>,
     /// Root ARGs left symbolic in Open mode, in file order. Empty in Bound mode.
     pub unbound: Vec<String>,
+}
+
+/// The recipe's WATCH block, merged across INVOKE.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WatchConfig {
+    /// How far a returned file's path may drift; 2 unless the root's WATCH
+    /// sets it. Invoked recipes' values are ignored (ADR-041).
+    pub depth_tolerance: u32,
+    /// Return-chain overrides by COPY key. The root's entries win over an
+    /// invoked recipe's for the same key.
+    pub overrides: std::collections::BTreeMap<String, Vec<TransformRef>>,
+}
+
+impl Default for WatchConfig {
+    fn default() -> Self {
+        WatchConfig {
+            depth_tolerance: 2,
+            overrides: std::collections::BTreeMap::new(),
+        }
+    }
 }
 
 /// A recipe version expanded through INVOKE.

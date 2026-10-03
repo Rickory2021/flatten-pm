@@ -8,12 +8,14 @@
 // `types.rs` are the parse output contract (docs/design/3_RECIPES.md).
 // Transform lookups go through the `Catalog` trait (`catalog.rs`).
 //
-// Implemented so far (plan chunk C4): ARG, COPY_DEFAULT_WITH, SOURCE, COPY
-// with EXCLUDE and OVERRIDE_WITH, RUN, and INVOKE; transform chains; path
-// normalization; the canonical COPY shape; Open/Bound ARG modes.
+// Implemented so far (plan chunk C5): every instruction (ARG,
+// COPY_DEFAULT_WITH, SOURCE, COPY with EXCLUDE and OVERRIDE_WITH, RUN,
+// INVOKE, WATCH); the resolver warnings L006 and L007. The lint pass lands
+// in C6.
 
 mod catalog;
 mod error;
+mod lint;
 mod parse;
 mod types;
 
@@ -21,10 +23,11 @@ use catalog::PendingOverlay;
 
 pub use catalog::{Catalog, RecipeSource, TransformInfo, TransformScope};
 pub use error::{Error, InvokeSite, Location, ParseErrorKind, PathIssue, Result, SourceRef};
+pub use lint::{LintCode, LintWarning};
 pub use parse::resolve::{ArgInput, Resolution, RootRef};
 pub use types::{
     Arg, CopyBlock, Exclude, Instruction, InvokedVersion, Position, Recipe, RunInstruction,
-    SourceInstruction, TransformRef,
+    SourceInstruction, TransformRef, WatchConfig,
 };
 
 /// The shipped generic recipe (`shipped-default`), embedded from
@@ -97,12 +100,13 @@ pub fn analyze(
     root: &RootRef,
 ) -> Result<Resolution> {
     let ast = parse::parse(source)?;
-    let recipe = match root {
+    let (recipe, mut warnings) = match root {
         RootRef::Pending { name: Some(name) } => {
             let overlay = PendingOverlay::new(catalog, name, source);
             parse::resolve::resolve(&ast, input, &overlay, root)?
         }
         _ => parse::resolve::resolve(&ast, input, catalog, root)?,
     };
-    Ok(Resolution { recipe })
+    lint::sort_warnings(&mut warnings, &recipe);
+    Ok(Resolution { recipe, warnings })
 }

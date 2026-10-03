@@ -36,18 +36,25 @@
 // the whole expansion at 10,000 SOURCE, COPY, and RUN instructions. Errors
 // point at the innermost recipe, with the INVOKE chain that led there.
 //
-// Implemented so far (plan chunk C4): ARG, COPY_DEFAULT_WITH, SOURCE, COPY
-// with EXCLUDE and OVERRIDE_WITH, RUN, INVOKE.
+// WATCH: the root's DEPTH_TOLERANCE sets the recipe's (default 2); an
+// invoked recipe's is ignored with L006 (ADR-041). OVERRIDE entries from
+// every recipe merge into one map after expansion: the entry closest to the
+// root wins a key (ties: first expanded), and each replaced invoked entry is
+// an L007 warning. Every winning key must name a COPY block; open mode skips
+// that check while the key, or any COPY key, is still symbolic.
+//
+// Every instruction is implemented (plan chunk C5).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use ignore::gitignore::GitignoreBuilder;
 
-use super::ast::{Ast, ChainElem, CopyAst, ExcludeAst, Flag, Item, Segment, Word};
+use super::ast::{Ast, ChainElem, CopyAst, ExcludeAst, Flag, Item, OverrideAst, Segment, Word};
 use super::path::{canonical_copy_shape, check_key, normalize_rel_path};
 use crate::recipe::catalog::{Catalog, RecipeSource, TransformInfo, TransformScope};
 use crate::recipe::error::{Error, InvokeSite, Location, ParseErrorKind, Result, SourceRef};
+use crate::recipe::lint::{LintCode, LintWarning};
 use crate::recipe::types::{
     Arg, CopyBlock, Exclude, Instruction, InvokedVersion, Position, Recipe, RunInstruction,
     SourceInstruction, TransformRef,
@@ -96,6 +103,23 @@ pub enum RootRef {
 pub struct Resolution {
     /// The resolved recipe.
     pub recipe: Recipe,
+    /// Warnings, sorted: root first, then invoked recipes in
+    /// `invoked_versions` order, then by position and code.
+    pub warnings: Vec<LintWarning>,
+}
+
+/// A WATCH OVERRIDE entry waiting for the post-expansion merge.
+struct PendingOverride {
+    key: String,
+    chain: Vec<TransformRef>,
+    /// For UnknownOverrideKey.
+    location: Location,
+    /// For L007.
+    position: Position,
+    /// `name@version` for invoked recipes; `None` for the root.
+    recipe: Option<String>,
+    /// Expansion path length when the entry was read: 1 for the root.
+    depth: usize,
 }
 
 /// A (recipe, version) on the expansion path.
@@ -206,7 +230,7 @@ pub(crate) fn resolve(
     input: &ArgInput,
     catalog: &dyn Catalog,
     root: &RootRef,
-) -> Result<Recipe> {
+) -> Result<(Recipe, Vec<LintWarning>)> {
     let (root_key, root_label, root_name) = match root {
         RootRef::Pending { name: Some(name) } => (
             ExpansionKey::Pending,
@@ -239,6 +263,7 @@ pub(crate) fn resolve(
         recipe: Recipe {
             args: Vec::new(),
             instructions: Vec::new(),
+            watch_config: Default::default(),
             invoked_versions: Vec::new(),
             unbound: Vec::new(),
         },
@@ -246,6 +271,8 @@ pub(crate) fn resolve(
         path: vec![(root_key, root_label)],
         cache: HashMap::new(),
         emitted: 0,
+        overrides: Vec::new(),
+        warnings: Vec::new(),
     };
     let mut frame = Frame::root(root_name);
     expander.expand(ast, &mut frame)?;
@@ -255,7 +282,8 @@ pub(crate) fn resolve(
     {
         return Err(Error::UnknownArg { name: name.clone() });
     }
-    Ok(expander.recipe)
+    expander.merge_overrides()?;
+    Ok((expander.recipe, expander.warnings))
 }
 
 /// Whole-expansion state shared by every frame.
@@ -271,6 +299,10 @@ struct Expander<'a> {
     cache: HashMap<ExpansionKey, Rc<Ast>>,
     /// SOURCE + COPY + RUN instructions emitted so far.
     emitted: usize,
+    /// WATCH OVERRIDE entries from every frame, in expansion order.
+    overrides: Vec<PendingOverride>,
+    /// Resolver warnings (L006, L007).
+    warnings: Vec<LintWarning>,
 }
 
 impl Expander<'_> {
@@ -331,7 +363,96 @@ impl Expander<'_> {
                     assigns,
                     pos,
                 } => self.invoke(name, *pin, assigns, *pos, frame)?,
+                Item::Watch {
+                    depth, overrides, ..
+                } => self.watch(*depth, overrides, frame)?,
             }
+        }
+        Ok(())
+    }
+
+    /// `WATCH:`: apply the root's DEPTH_TOLERANCE (an invoked one is L006)
+    /// and collect OVERRIDE entries for the merge after expansion.
+    fn watch(
+        &mut self,
+        depth: Option<(u32, Position)>,
+        overrides: &[OverrideAst],
+        frame: &Frame,
+    ) -> Result<()> {
+        let invoked = frame.binding.is_some().then(|| frame.label());
+        if let Some((value, pos)) = depth {
+            match &invoked {
+                None => self.recipe.watch_config.depth_tolerance = value,
+                Some(label) => self.warnings.push(LintWarning {
+                    code: LintCode::L006,
+                    message: format!(
+                        "DEPTH_TOLERANCE {value} in invoked recipe {label} is ignored; \
+                         only the root recipe's WATCH sets it"
+                    ),
+                    position: frame.stamp(pos),
+                    recipe: Some(label.clone()),
+                }),
+            }
+        }
+
+        let mut seen = HashSet::new();
+        for entry in overrides {
+            let key = substitute(&entry.key, frame)?;
+            if !seen.insert(key.clone()) {
+                return Err(frame.err(
+                    entry.pos,
+                    ParseErrorKind::Duplicate {
+                        what: format!("OVERRIDE key {key}"),
+                    },
+                ));
+            }
+            let chain = self.resolve_chain(&entry.chain, frame)?;
+            self.overrides.push(PendingOverride {
+                key,
+                chain,
+                location: frame.loc(entry.pos),
+                position: frame.stamp(entry.pos),
+                recipe: invoked.clone(),
+                depth: self.path.len(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Merge OVERRIDE entries into the WATCH config after expansion. The
+    /// entry closest to the root wins a key (ties: first expanded); each
+    /// replaced entry is L007. Every winning key must name a COPY block,
+    /// except in open mode while the key or any COPY key is symbolic.
+    fn merge_overrides(&mut self) -> Result<()> {
+        let mut entries = std::mem::take(&mut self.overrides);
+        entries.sort_by_key(|e| e.depth);
+        let open = matches!(self.input, ArgInput::Open);
+        let symbolic_copy_key = open && self.keys.keys().any(|k| k.contains("${"));
+
+        for entry in entries {
+            if self.recipe.watch_config.overrides.contains_key(&entry.key) {
+                self.warnings.push(LintWarning {
+                    code: LintCode::L007,
+                    message: format!(
+                        "WATCH OVERRIDE for {} is replaced by an entry closer to the root recipe",
+                        entry.key
+                    ),
+                    position: entry.position,
+                    recipe: entry.recipe,
+                });
+                continue;
+            }
+            let symbolic = symbolic_copy_key || (open && entry.key.contains("${"));
+            if !symbolic && !self.keys.contains_key(&entry.key) {
+                return Err(Error::Parse {
+                    location: Box::new(entry.location),
+                    kind: ParseErrorKind::UnknownOverrideKey { key: entry.key },
+                });
+            }
+            self.recipe
+                .watch_config
+                .overrides
+                .insert(entry.key, entry.chain);
         }
         Ok(())
     }
@@ -768,6 +889,7 @@ mod tests {
 
     use crate::recipe::catalog::{MemCatalog, TransformScope};
     use crate::recipe::error::{Error, InvokeSite, Location, ParseErrorKind, PathIssue, SourceRef};
+    use crate::recipe::lint::{LintCode, LintWarning};
     use crate::recipe::types::{
         CopyBlock, Exclude, Instruction, InvokedVersion, Position, Recipe, RunInstruction,
         SourceInstruction, TransformRef,
@@ -898,14 +1020,15 @@ mod tests {
         chain.iter().map(|t| t.name.as_str()).collect()
     }
 
-    /// Test 39 (C1 to C4 rows): every substitutable argument substitutes.
+    /// Test 39 (C1 to C5 rows): every substitutable argument substitutes.
     #[test]
     fn substitutes_in_every_target() {
         let source = "ARG repo\nARG sub\nARG set\nARG fmt\n\
                       COPY_DEFAULT_WITH [enrichment-injection --template-set ${set}]\n\
                       SOURCE ${repo}:\n  COPY ${sub}/ ${repo}/${sub}/ AS ${repo}-${sub}:\n\
                       \x20   EXCLUDE ${sub}/*.tmp\n\
-                      RUN pack --format ${fmt} --only ${repo}/** ${sub}/*.rs";
+                      RUN pack --format ${fmt} --only ${repo}/** ${sub}/*.rs\n\
+                      WATCH:\n  OVERRIDE:\n    ${repo}-${sub} [enrichment-trim]";
         let recipe = run(
             source,
             &bound(&[
@@ -948,6 +1071,11 @@ mod tests {
         assert!(
             !run.transform.args.contains_key("only"),
             "--only never appears in the transform's args"
+        );
+        assert!(
+            recipe.watch_config.overrides.contains_key("repo-a-lib"),
+            "OVERRIDE key substituted, got {:?}",
+            recipe.watch_config.overrides.keys().collect::<Vec<_>>()
         );
 
         let catalog = MemCatalog::builtins().with_recipe(
@@ -1420,7 +1548,7 @@ mod tests {
         );
     }
 
-    /// Test 48 (C2 and C3 rows): COPY chains need file transforms; RUN needs a directory transform.
+    /// Test 48 (C2, C3, and C5 rows): COPY and OVERRIDE chains need file transforms; RUN needs a directory transform.
     #[test]
     fn scope_mismatch_errors() {
         let wrong = |name: &str, expected, found| ParseErrorKind::WrongScope {
@@ -1450,6 +1578,12 @@ mod tests {
                 wrong("pack", TransformScope::File, TransformScope::Directory),
                 3,
                 20,
+            ),
+            (
+                "SOURCE r:\n  COPY . x/ AS k\nWATCH:\n  OVERRIDE:\n    k [pack]",
+                wrong("pack", TransformScope::File, TransformScope::Directory),
+                5,
+                8,
             ),
         ];
         for (source, kind, line, col) in cases {
@@ -2055,6 +2189,189 @@ mod tests {
             origins,
             vec![None, None, Some(11), Some(11), Some(11)],
             "root positions have no version id; invoked ones carry base's"
+        );
+    }
+
+    /// Test 65: WATCH OVERRIDE keys must name a COPY block, checked after
+    /// expansion; open mode skips the check while a key is symbolic.
+    #[test]
+    fn watch_override_unknown_key_rules() {
+        let unknown = |key: &str| ParseErrorKind::UnknownOverrideKey { key: key.into() };
+
+        let literal = "SOURCE r:\n  COPY . x/ AS a\nWATCH:\n  OVERRIDE:\n    b [enrichment-trim]";
+        for input in [ArgInput::Open, bound(&[])] {
+            assert_eq!(
+                parse_error(literal, &input),
+                (unknown("b"), 5, 5),
+                "a literal unknown key errors in {input:?}"
+            );
+        }
+
+        let watch_first = run(
+            "WATCH:\n  OVERRIDE:\n    a [enrichment-trim]\nSOURCE r:\n  COPY . x/ AS a",
+            &ArgInput::Open,
+        );
+        assert_eq!(
+            watch_first
+                .watch_config
+                .overrides
+                .get("a")
+                .map(|c| chain_names(c)),
+            Some(vec!["enrichment-trim"]),
+            "WATCH may precede the COPY it names"
+        );
+        assert_eq!(
+            watch_first.watch_config.depth_tolerance, 2,
+            "DEPTH_TOLERANCE defaults to 2"
+        );
+
+        let symbolic_copy =
+            "ARG k\nSOURCE r:\n  COPY . x/ AS ${k}\nWATCH:\n  OVERRIDE:\n    lit [enrichment-trim]";
+        assert!(
+            open_ok(symbolic_copy),
+            "open mode skips the check while a COPY key is symbolic"
+        );
+        run(symbolic_copy, &bound(&[("k", "lit")]));
+        assert_eq!(
+            parse_error(symbolic_copy, &bound(&[("k", "other")])),
+            (unknown("lit"), 6, 5),
+            "bound mode enforces the check"
+        );
+
+        let symbolic_key =
+            "ARG k\nSOURCE r:\n  COPY . x/ AS a\nWATCH:\n  OVERRIDE:\n    ${k} [enrichment-trim]";
+        assert!(
+            open_ok(symbolic_key),
+            "open mode skips the check while the OVERRIDE key is symbolic"
+        );
+        assert!(
+            run(symbolic_key, &bound(&[("k", "a")]))
+                .watch_config
+                .overrides
+                .contains_key("a"),
+            "a substituted OVERRIDE key resolves"
+        );
+        assert_eq!(
+            parse_error(symbolic_key, &bound(&[("k", "z")])),
+            (unknown("z"), 6, 5),
+            "a substituted unknown key errors once bound"
+        );
+
+        assert_eq!(
+            run("WATCH:\n  DEPTH_TOLERANCE 0", &ArgInput::Open)
+                .watch_config
+                .depth_tolerance,
+            0,
+            "the root's DEPTH_TOLERANCE sets the value"
+        );
+
+        assert_eq!(
+            parse_error(
+                "ARG a=x\nARG b=x\nSOURCE r:\n  COPY . x/ AS x\nWATCH:\n  OVERRIDE:\n    ${a} []\n    ${b} []",
+                &ArgInput::Open
+            ),
+            (
+                ParseErrorKind::Duplicate {
+                    what: "OVERRIDE key x".into()
+                },
+                8,
+                5
+            ),
+            "keys that collide after substitution are duplicates"
+        );
+    }
+
+    /// Test 66: an invoked recipe's DEPTH_TOLERANCE is ignored (L006); its
+    /// OVERRIDE entries merge, and the entry closest to the root wins (L007).
+    #[test]
+    fn invoked_watch_depth_ignored_and_overrides_merged() {
+        let catalog = MemCatalog::builtins()
+            .with_recipe(
+                "base",
+                1,
+                1,
+                &[(
+                    1,
+                    11,
+                    "SOURCE r:\n  COPY . b/ AS bk\n  COPY . c/ AS ck\nWATCH:\n  DEPTH_TOLERANCE 5\n  OVERRIDE:\n    bk [enrichment-trim]\n    ck [enrichment-trim]",
+                )],
+            )
+            .with_recipe(
+                "inner",
+                2,
+                1,
+                &[(
+                    1,
+                    21,
+                    "SOURCE r:\n  COPY . i/ AS ik\nWATCH:\n  OVERRIDE:\n    ik [enrichment-trim]",
+                )],
+            )
+            .with_recipe(
+                "outer",
+                3,
+                1,
+                &[(1, 31, "INVOKE inner\nWATCH:\n  OVERRIDE:\n    ik []")],
+            );
+        let stamped = |line, col, id| Position {
+            line,
+            col,
+            recipe_version_id: Some(id),
+        };
+
+        let resolution = analyze(
+            "INVOKE base\nWATCH:\n  DEPTH_TOLERANCE 3\n  OVERRIDE:\n    ck []",
+            &ArgInput::Open,
+            &catalog,
+            &INPUT,
+        )
+        .expect("resolves");
+        let watch = &resolution.recipe.watch_config;
+        assert_eq!(watch.depth_tolerance, 3, "the root's DEPTH_TOLERANCE wins");
+        let merged: Vec<(&str, Vec<&str>)> = watch
+            .overrides
+            .iter()
+            .map(|(k, c)| (k.as_str(), chain_names(c)))
+            .collect();
+        assert_eq!(
+            merged,
+            vec![("bk", vec!["enrichment-trim"]), ("ck", vec![])],
+            "invoked entries merge; the root's entry wins its key"
+        );
+        let codes: Vec<(LintCode, Position, Option<&str>)> = resolution
+            .warnings
+            .iter()
+            .map(|w| (w.code, w.position, w.recipe.as_deref()))
+            .collect();
+        assert_eq!(
+            codes,
+            vec![
+                (LintCode::L006, stamped(5, 3, 11), Some("base@1")),
+                (LintCode::L007, stamped(8, 5, 11), Some("base@1")),
+            ],
+            "L006 at the ignored DEPTH_TOLERANCE, L007 at the replaced entry, sorted"
+        );
+
+        let nested = analyze("INVOKE outer", &ArgInput::Open, &catalog, &INPUT).expect("resolves");
+        assert_eq!(
+            nested
+                .recipe
+                .watch_config
+                .overrides
+                .get("ik")
+                .map(|c| chain_names(c)),
+            Some(vec![]),
+            "the caller's entry wins even when its WATCH comes after the INVOKE"
+        );
+        assert_eq!(
+            nested.warnings,
+            vec![LintWarning {
+                code: LintCode::L007,
+                message: "WATCH OVERRIDE for ik is replaced by an entry closer to the root recipe"
+                    .into(),
+                position: stamped(5, 5, 21),
+                recipe: Some("inner@1".into()),
+            }],
+            "the replaced nested entry is L007"
         );
     }
 }
