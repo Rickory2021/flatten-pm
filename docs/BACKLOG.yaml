@@ -405,7 +405,7 @@ stories:
         have it parsed into an executable structure, and persist it as a versioned
         row, so that recipes are portable files and stored history at once.
       stage: s1
-      status: backlog
+      status: in-progress
       acceptance_criteria:
         - "Grammar documented in docs/RECIPE.md: line-oriented, # comments, backslash continuation, double-quoted args with escapes, ${NAME} substitution, significant indentation for nesting, blocks opened by trailing :"
         - "Recipe-level instructions (execute in file order): ARG name[=default], COPY_DEFAULT_WITH [transforms], SOURCE <repo>:, RUN <transform> [--only <glob>...], INVOKE <recipe>[@N] [name=value ...], WATCH:"
