@@ -1,0 +1,6 @@
+# fixtures/recipes/base.recipe
+# Invoked by invoke.recipe; its key substitutes so it can be invoked per repo.
+ARG repo
+COPY_DEFAULT_WITH [enrichment-injection --template-set default]
+SOURCE ${repo}:
+  COPY . ${repo}/ AS ${repo}-files

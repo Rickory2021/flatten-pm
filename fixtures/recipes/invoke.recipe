@@ -1,0 +1,4 @@
+# fixtures/recipes/invoke.recipe
+# Expands base (add base first) for one repo, then flattens.
+INVOKE base repo=repo-a
+RUN flatten

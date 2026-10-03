@@ -1,0 +1,7 @@
+# fixtures/recipes/misorder.recipe
+# Valid, but the COPY's empty chain drops the injection: lint warns L005.
+ARG repo
+COPY_DEFAULT_WITH [enrichment-injection --template-set default]
+SOURCE ${repo}:
+  COPY . ${repo}/ AS all-files:
+    OVERRIDE_WITH []

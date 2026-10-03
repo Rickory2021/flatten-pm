@@ -1,0 +1,3 @@
+# fixtures/recipes/bad-dotdot-dest.recipe
+SOURCE r:
+  COPY . ../out/ AS k

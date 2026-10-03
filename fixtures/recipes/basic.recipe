@@ -1,0 +1,21 @@
+# fixtures/recipes/basic.recipe
+# Every instruction the s1 builtins support: ARG, COPY_DEFAULT_WITH, SOURCE
+# with two COPY blocks (EXCLUDE, OVERRIDE_WITH), RUN, and WATCH.
+ARG repo
+COPY_DEFAULT_WITH [enrichment-injection --template-set default]
+
+SOURCE ${repo}:
+  # everything except logs, dependencies, and binary files
+  COPY . ${repo}/ AS all-files:
+    EXCLUDE *.log node_modules/ \
+      --binary
+  COPY docs/ ${repo}/docs/ AS docs-files:
+    OVERRIDE_WITH [enrichment-injection --template-set "default"]
+
+RUN flatten
+RUN context-manifest
+
+WATCH:
+  DEPTH_TOLERANCE 2
+  OVERRIDE:
+    docs-files [enrichment-trim]

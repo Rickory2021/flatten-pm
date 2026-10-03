@@ -1,6 +1,7 @@
 // src-cli/src/main.rs
 //
-// Flatten PM CLI. Shell access to all flatten-core operations.
+// Flatten PM CLI. Shell access to all flatten-core operations. Subcommand
+// groups with their own module live in `commands/` (recipe so far).
 //
 // Exit codes: 0 success, 1 domain error, 2 usage error (clap handles 2).
 
@@ -10,6 +11,9 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 use flatten_core::db;
 use flatten_core::ingest;
+use flatten_core::recipe;
+
+mod commands;
 
 // ---------------------------------------------------------------------------
 // CLI structure
@@ -43,7 +47,7 @@ enum CliCommand {
     /// Repository management
     Repo(RepoArgs),
     /// Recipe management
-    Recipe,
+    Recipe(commands::recipe::RecipeArgs),
     /// Transform management
     Transform,
     /// Template management
@@ -184,10 +188,23 @@ enum RepoCommand {
 // Error type
 // ---------------------------------------------------------------------------
 
-/// CLI error with a `kind` discriminator for JSON output.
+/// CLI error with a `kind` discriminator for JSON output, and optional
+/// structured `detail` (a parse error's location).
 struct CliError {
     kind: &'static str,
     msg: String,
+    detail: Option<serde_json::Value>,
+}
+
+impl CliError {
+    /// An error with no detail.
+    fn new(kind: &'static str, msg: impl Into<String>) -> Self {
+        CliError {
+            kind,
+            msg: msg.into(),
+            detail: None,
+        }
+    }
 }
 
 impl From<ingest::error::Error> for CliError {
@@ -202,18 +219,46 @@ impl From<ingest::error::Error> for CliError {
             | ingest::error::Error::Trie(flatten_core::trie::error::Error::Io { .. }) => "io",
             _ => "database",
         };
-        CliError {
-            kind,
-            msg: e.to_string(),
-        }
+        CliError::new(kind, e.to_string())
     }
 }
 
 impl From<db::error::Error> for CliError {
     fn from(e: db::error::Error) -> Self {
+        CliError::new("database", e.to_string())
+    }
+}
+
+/// Recipe errors: `Database` is `database`; every other variant is
+/// `domain`. A parse error carries `{line, col, recipe, version}` from its
+/// innermost location (`recipe` and `version` are null for the root).
+impl From<recipe::Error> for CliError {
+    fn from(e: recipe::Error) -> Self {
+        let detail = match &e {
+            recipe::Error::Parse { location, .. } => {
+                let (name, version) = match &location.source {
+                    recipe::SourceRef::Root => (None, None),
+                    recipe::SourceRef::Invoked { name, version } => {
+                        (Some(name.clone()), Some(*version))
+                    }
+                };
+                Some(serde_json::json!({
+                    "line": location.line,
+                    "col": location.col,
+                    "recipe": name,
+                    "version": version,
+                }))
+            }
+            _ => None,
+        };
+        let kind = match &e {
+            recipe::Error::Database(_) => "database",
+            _ => "domain",
+        };
         CliError {
-            kind: "database",
+            kind,
             msg: e.to_string(),
+            detail,
         }
     }
 }
@@ -221,10 +266,7 @@ impl From<db::error::Error> for CliError {
 /// Backward compatibility: existing handlers return `Result<(), String>`.
 impl From<String> for CliError {
     fn from(msg: String) -> Self {
-        CliError {
-            kind: "database",
-            msg,
-        }
+        CliError::new("database", msg)
     }
 }
 
@@ -262,10 +304,8 @@ fn resolve_db_path(cli: &Cli) -> PathBuf {
 fn open_writer(cli: &Cli) -> Result<db::writer::Writer, CliError> {
     let path = resolve_db_path(cli);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| CliError {
-            kind: "io",
-            msg: format!("failed to create data directory: {e}"),
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CliError::new("io", format!("failed to create data directory: {e}")))?;
     }
     Ok(db::writer::Writer::open(&path)?)
 }
@@ -317,12 +357,15 @@ fn print_rows(json: bool, columns: &[String], rows: Vec<Vec<String>>) {
     }
 }
 
-fn print_err(json: bool, kind: &str, msg: &str) {
+fn print_err(json: bool, err: &CliError) {
     if json {
-        let out = serde_json::json!({ "error": msg, "kind": kind });
-        eprintln!("{}", serde_json::to_string(&out).unwrap());
+        let mut out = serde_json::json!({ "error": err.msg, "kind": err.kind });
+        if let (Some(detail), Some(obj)) = (&err.detail, out.as_object_mut()) {
+            obj.insert("detail".to_string(), detail.clone());
+        }
+        eprintln!("{out}");
     } else {
-        eprintln!("error: {msg}");
+        eprintln!("error: {}", err.msg);
     }
 }
 
@@ -513,10 +556,8 @@ fn cmd_repo_ls(cli: &Cli) -> Result<(), CliError> {
     if cli.json {
         let out = serde_json::json!({
             "ok": true,
-            "repos": serde_json::to_value(&repos).map_err(|e| CliError {
-                kind: "database",
-                msg: e.to_string(),
-            })?,
+            "repos": serde_json::to_value(&repos)
+                .map_err(|e| CliError::new("database", e.to_string()))?,
         });
         println!("{}", serde_json::to_string(&out).unwrap());
     } else {
@@ -696,21 +737,28 @@ fn main() -> ExitCode {
             RepoCommand::Reingest { name } => cmd_repo_reingest(&cli, name),
             RepoCommand::Rm { name } => cmd_repo_rm(&cli, name),
             RepoCommand::History { .. } | RepoCommand::Rollback { .. } => {
-                print_err(cli.json, "usage", "subcommand not yet implemented");
+                print_err(
+                    cli.json,
+                    &CliError::new("usage", "subcommand not yet implemented"),
+                );
                 return ExitCode::from(2);
             }
         },
 
-        // Reserved groups (other than Repo, which is now wired)
-        CliCommand::Recipe
-        | CliCommand::Transform
+        CliCommand::Recipe(args) => commands::recipe::run(&cli, args),
+
+        // Reserved groups (other than Repo and Recipe, which are wired)
+        CliCommand::Transform
         | CliCommand::Template
         | CliCommand::Binding
         | CliCommand::Export
         | CliCommand::Watch
         | CliCommand::Flag
         | CliCommand::History => {
-            print_err(cli.json, "usage", "subcommand not yet implemented");
+            print_err(
+                cli.json,
+                &CliError::new("usage", "subcommand not yet implemented"),
+            );
             return ExitCode::from(2);
         }
     };
@@ -718,7 +766,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            print_err(cli.json, e.kind, &e.msg);
+            print_err(cli.json, &e);
             ExitCode::from(1)
         }
     }

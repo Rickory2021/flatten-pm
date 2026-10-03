@@ -1,0 +1,2 @@
+# fixtures/recipes/bad-unknown-instruction.recipe
+COPIE . x/ AS k

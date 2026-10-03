@@ -1,0 +1,4 @@
+# fixtures/recipes/bad-duplicate-key.recipe
+SOURCE r:
+  COPY a/ a/ AS dup
+  COPY b/ b/ AS dup

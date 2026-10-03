@@ -1,0 +1,2 @@
+# fixtures/recipes/bad-copy-outside-source.recipe
+COPY . x/ AS k
