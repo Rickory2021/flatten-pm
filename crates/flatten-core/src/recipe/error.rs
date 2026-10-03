@@ -17,10 +17,14 @@ use super::types::Position;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A lexical, structural, or semantic error at a source location.
+    // SPEC-DEVIATION(EX-001): the spec has `location: Location`. It is boxed
+    // because Location grew INVOKE context (`via`, invoked names) and the
+    // unboxed error passed clippy's result_large_err limit (128 bytes). Field
+    // access (`location.line`) reads the same through the box.
     #[error("{location}: {kind}")]
     Parse {
         /// Where the error points.
-        location: Location,
+        location: Box<Location>,
         /// What went wrong.
         kind: ParseErrorKind,
     },
@@ -39,12 +43,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Build a parse error at a root-recipe position.
 pub(crate) fn parse_err(pos: Position, kind: ParseErrorKind) -> Error {
     Error::Parse {
-        location: Location::root(pos),
+        location: Box::new(Location::root(pos)),
         kind,
     }
 }
 
-/// Where an error points.
+/// Where an error points: the innermost recipe containing the offending
+/// token, and the chain of INVOKE lines that led there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
     /// 1-based line.
@@ -53,6 +58,8 @@ pub struct Location {
     pub col: u32,
     /// Which recipe text the line and column refer to.
     pub source: SourceRef,
+    /// INVOKE sites from the root down to `source`; empty when `source` is Root.
+    pub via: Vec<InvokeSite>,
 }
 
 /// Which recipe text a location refers to.
@@ -60,6 +67,27 @@ pub struct Location {
 pub enum SourceRef {
     /// The recipe being analyzed.
     Root,
+    /// A recipe expanded through INVOKE.
+    Invoked {
+        /// The invoked recipe's name.
+        name: String,
+        /// Its version number.
+        version: u32,
+    },
+}
+
+/// One INVOKE line on the way to an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvokeSite {
+    /// The recipe that contains the INVOKE line: the root's name (or
+    /// `<input>` for unsaved text), or an invoked recipe's name.
+    pub recipe: String,
+    /// The containing recipe's version; `None` for the root.
+    pub version: Option<u32>,
+    /// 1-based line of the INVOKE.
+    pub line: u32,
+    /// 1-based column of the INVOKE.
+    pub col: u32,
 }
 
 impl Location {
@@ -69,22 +97,56 @@ impl Location {
             line: pos.line,
             col: pos.col,
             source: SourceRef::Root,
+            via: Vec::new(),
         }
     }
 }
 
 impl fmt::Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.source {
-            SourceRef::Root => fmt_origin(f, self.line, self.col),
+        match &self.source {
+            SourceRef::Root => fmt_origin(f, None, self.line, self.col),
+            SourceRef::Invoked { name, version } => {
+                fmt_origin(f, Some(&format!("{name}@{version}")), self.line, self.col)?;
+                if !self.via.is_empty() {
+                    f.write_str(" (via INVOKE at ")?;
+                    for (i, site) in self.via.iter().enumerate() {
+                        if i > 0 {
+                            f.write_str(" -> ")?;
+                        }
+                        write!(f, "{site}")?;
+                    }
+                    f.write_str(")")?;
+                }
+                Ok(())
+            }
         }
     }
 }
 
-/// Format a source origin as `line:col`. The one formatter for every
-/// location string the recipe module prints.
-pub(crate) fn fmt_origin(f: &mut fmt::Formatter<'_>, line: u32, col: u32) -> fmt::Result {
-    write!(f, "{line}:{col}")
+impl fmt::Display for InvokeSite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let recipe = match self.version {
+            Some(version) => format!("{}@{version}", self.recipe),
+            None => self.recipe.clone(),
+        };
+        fmt_origin(f, Some(&recipe), self.line, self.col)
+    }
+}
+
+/// Format a source origin as `line:col` (root) or `recipe line:col`
+/// (invoked). The one formatter for every location string the recipe module
+/// prints.
+pub(crate) fn fmt_origin(
+    f: &mut fmt::Formatter<'_>,
+    recipe: Option<&str>,
+    line: u32,
+    col: u32,
+) -> fmt::Result {
+    match recipe {
+        Some(recipe) => write!(f, "{recipe} {line}:{col}"),
+        None => write!(f, "{line}:{col}"),
+    }
 }
 
 /// What a path failed on. See the path normalization table in the EX-001 spec.
@@ -279,6 +341,57 @@ pub enum ParseErrorKind {
         /// The transform's scope.
         found: TransformScope,
     },
+    /// An INVOKE target the catalog does not know.
+    #[error("unknown recipe {name}")]
+    UnknownRecipe {
+        /// The recipe name.
+        name: String,
+    },
+    /// A pinned recipe version that does not exist.
+    #[error("recipe {name} has no version {version}")]
+    RecipeVersionNotFound {
+        /// The recipe name.
+        name: String,
+        /// The pinned version.
+        version: u32,
+    },
+    /// A required ARG of an invoked recipe with no value from the INVOKE
+    /// line, the caller's ARGs, or a default.
+    #[error(
+        "INVOKE {invoked}: required ARG {arg} (declared at {}:{}) has no value; {caller} neither passes {arg}= nor declares ARG {arg}",
+        .arg_pos.line,
+        .arg_pos.col
+    )]
+    UnboundInvokedArg {
+        /// The ARG name.
+        arg: String,
+        /// The invoked recipe, `name@version`.
+        invoked: String,
+        /// The calling recipe.
+        caller: String,
+        /// Where the invoked recipe declares the ARG.
+        arg_pos: Position,
+    },
+    /// An INVOKE assignment for an ARG the invoked recipe never declares.
+    #[error("INVOKE {invoked}: the recipe declares no ARG {arg}")]
+    UnknownInvokeArg {
+        /// The assigned name.
+        arg: String,
+        /// The invoked recipe, `name@version`.
+        invoked: String,
+    },
+    /// An INVOKE that reaches a recipe version already on the expansion path.
+    #[error("INVOKE cycle: {}", .chain.join(" -> "))]
+    InvokeCycle {
+        /// The expansion path, root first, ending with the repeated version.
+        chain: Vec<String>,
+    },
+    /// INVOKE nesting deeper than 100 levels.
+    #[error("INVOKE nesting is deeper than 100 levels")]
+    InvokeDepthExceeded,
+    /// More than 10,000 SOURCE, COPY, and RUN instructions after expansion.
+    #[error("the recipe expands to more than 10000 instructions")]
+    ExpansionTooLarge,
     /// A COPY src or dest that fails path normalization.
     #[error("invalid path {path:?}: {issue}")]
     InvalidPath {
@@ -293,7 +406,7 @@ pub enum ParseErrorKind {
 mod tests {
     use super::*;
 
-    /// Test 101 (C1 rows): root errors display as `line:col: message`.
+    /// Test 101 (C1 and C4 rows): errors and locations display as `origin: message`.
     #[test]
     fn error_warning_and_location_display_formats() {
         let err = parse_err(
@@ -324,6 +437,62 @@ mod tests {
             dup.to_string(),
             "4:20: duplicate COPY key \"k\" (first defined at 3:20)",
             "nested location in a message uses the same formatter"
+        );
+
+        let once = Location {
+            line: 3,
+            col: 5,
+            source: SourceRef::Invoked {
+                name: "base".into(),
+                version: 2,
+            },
+            via: vec![InvokeSite {
+                recipe: "invoke".into(),
+                version: None,
+                line: 7,
+                col: 1,
+            }],
+        };
+        assert_eq!(
+            once.to_string(),
+            "base@2 3:5 (via INVOKE at invoke 7:1)",
+            "invoked location names the recipe and the INVOKE site"
+        );
+        let nested = Location {
+            line: 2,
+            col: 1,
+            source: SourceRef::Invoked {
+                name: "leaf".into(),
+                version: 1,
+            },
+            via: vec![
+                InvokeSite {
+                    recipe: "invoke".into(),
+                    version: None,
+                    line: 7,
+                    col: 1,
+                },
+                InvokeSite {
+                    recipe: "base".into(),
+                    version: Some(2),
+                    line: 4,
+                    col: 1,
+                },
+            ],
+        };
+        assert_eq!(
+            nested.to_string(),
+            "leaf@1 2:1 (via INVOKE at invoke 7:1 -> base@2 4:1)",
+            "nested via lists every INVOKE root first"
+        );
+        let invoked_err = Error::Parse {
+            location: Box::new(nested),
+            kind: ParseErrorKind::UnknownInstruction("COPIE".into()),
+        };
+        assert_eq!(
+            invoked_err.to_string(),
+            "leaf@1 2:1 (via INVOKE at invoke 7:1 -> base@2 4:1): unknown instruction 'COPIE'",
+            "an invoked error line starts with its location"
         );
 
         let unknown = Error::UnknownArg { name: "zz".into() };

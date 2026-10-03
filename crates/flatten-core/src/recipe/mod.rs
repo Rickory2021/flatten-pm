@@ -8,8 +8,8 @@
 // `types.rs` are the parse output contract (docs/design/3_RECIPES.md).
 // Transform lookups go through the `Catalog` trait (`catalog.rs`).
 //
-// Implemented so far (plan chunk C3): ARG, COPY_DEFAULT_WITH, SOURCE, COPY
-// with EXCLUDE and OVERRIDE_WITH, and RUN; transform chains; path
+// Implemented so far (plan chunk C4): ARG, COPY_DEFAULT_WITH, SOURCE, COPY
+// with EXCLUDE and OVERRIDE_WITH, RUN, and INVOKE; transform chains; path
 // normalization; the canonical COPY shape; Open/Bound ARG modes.
 
 mod catalog;
@@ -17,12 +17,14 @@ mod error;
 mod parse;
 mod types;
 
-pub use catalog::{Catalog, TransformInfo, TransformScope};
-pub use error::{Error, Location, ParseErrorKind, PathIssue, Result, SourceRef};
-pub use parse::resolve::{ArgInput, Resolution};
+use catalog::PendingOverlay;
+
+pub use catalog::{Catalog, RecipeSource, TransformInfo, TransformScope};
+pub use error::{Error, InvokeSite, Location, ParseErrorKind, PathIssue, Result, SourceRef};
+pub use parse::resolve::{ArgInput, Resolution, RootRef};
 pub use types::{
-    Arg, CopyBlock, Exclude, Instruction, Position, Recipe, RunInstruction, SourceInstruction,
-    TransformRef,
+    Arg, CopyBlock, Exclude, Instruction, InvokedVersion, Position, Recipe, RunInstruction,
+    SourceInstruction, TransformRef,
 };
 
 /// The shipped generic recipe (`shipped-default`), embedded from
@@ -82,9 +84,25 @@ const fn strip_prefix_const<'a>(text: &'a str, prefix: &str) -> &'a str {
 /// `ArgInput::Open` validates at save time: required ARGs without a value
 /// stay symbolic (`${name}` survives in output strings), and ARG defaults
 /// are checked as final values. `ArgInput::Bound` resolves with concrete
-/// values, as export does. Transform names resolve through `catalog`.
-pub fn analyze(source: &str, input: &ArgInput, catalog: &dyn Catalog) -> Result<Resolution> {
+/// values, as export does. Transform names and INVOKE targets resolve
+/// through `catalog`.
+///
+/// `root` names the text being analyzed. For `RootRef::Pending` with a
+/// name, unpinned lookups of that name see `source` itself, so an INVOKE of
+/// the recipe being saved is reported as the cycle it will be once saved.
+pub fn analyze(
+    source: &str,
+    input: &ArgInput,
+    catalog: &dyn Catalog,
+    root: &RootRef,
+) -> Result<Resolution> {
     let ast = parse::parse(source)?;
-    let recipe = parse::resolve::resolve(&ast, input, catalog)?;
+    let recipe = match root {
+        RootRef::Pending { name: Some(name) } => {
+            let overlay = PendingOverlay::new(catalog, name, source);
+            parse::resolve::resolve(&ast, input, &overlay, root)?
+        }
+        _ => parse::resolve::resolve(&ast, input, catalog, root)?,
+    };
     Ok(Resolution { recipe })
 }

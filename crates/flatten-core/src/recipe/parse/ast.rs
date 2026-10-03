@@ -34,6 +34,14 @@ pub(crate) enum Item {
         copies: Vec<CopyAst>,
         pos: Position,
     },
+    /// `INVOKE <recipe>[@N] [name=value ...]`. Each assignment keeps the
+    /// position of its token.
+    Invoke {
+        name: String,
+        pin: Option<u32>,
+        assigns: Vec<(String, Word, Position)>,
+        pos: Position,
+    },
     /// `RUN <transform>[@N] [flags] [--only <glob> ...]`.
     Run {
         name: String,

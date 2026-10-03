@@ -16,9 +16,12 @@
 // `--binary` marker; any other bare `--` token is an unknown flag) and at
 // most one OVERRIDE_WITH chain.
 //
-// Implemented so far (plan chunk C3): ARG, COPY_DEFAULT_WITH, SOURCE, COPY
-// with EXCLUDE and OVERRIDE_WITH, RUN. Any other first token is an unknown
-// instruction until its chunk lands.
+// INVOKE takes a recipe name, an optional `@N` pin, and `name=value`
+// assignments for the invoked recipe's ARGs.
+//
+// Implemented so far (plan chunk C4): ARG, COPY_DEFAULT_WITH, SOURCE, COPY
+// with EXCLUDE and OVERRIDE_WITH, RUN, INVOKE. Any other first token is an
+// unknown instruction until its chunk lands.
 
 use std::collections::HashSet;
 
@@ -37,6 +40,7 @@ const KEYWORDS: &[&str] = &[
     "COPY",
     "EXCLUDE",
     "OVERRIDE_WITH",
+    "INVOKE",
 ];
 /// Keywords that open a block and consume a trailing `:`.
 const BLOCK_KEYWORDS: &[&str] = &["SOURCE", "COPY"];
@@ -157,6 +161,10 @@ fn top_level(node: Node) -> Result<Item> {
         Some(("RUN", _)) => {
             no_children(&node)?;
             run(&node.line)
+        }
+        Some(("INVOKE", _)) => {
+            no_children(&node)?;
+            invoke(&node.line)
         }
         Some(("COPY", _)) => Err(parse_err(node.line.pos, ParseErrorKind::CopyOutsideSource)),
         Some((instr @ ("EXCLUDE" | "OVERRIDE_WITH"), _)) => Err(parse_err(
@@ -412,6 +420,9 @@ const FLAG_FORM: &str = "--flag";
 const NAME_FORM: &str = "a transform name matching [A-Za-z0-9][A-Za-z0-9_.-]*";
 const ONLY_FORM: &str = "--only <glob>...";
 const RUN_FORM: &str = "RUN <transform>[@N] [--flag value ...] [--only <glob>...]";
+const INVOKE_FORM: &str = "INVOKE <recipe>[@N] [name=value ...]";
+const ASSIGN_FORM: &str = "name=value";
+const RECIPE_NAME_FORM: &str = "a recipe name matching [A-Za-z0-9][A-Za-z0-9_.-]*";
 
 fn syntax(pos: Position, instr: &'static str, expected: &'static str) -> Error {
     parse_err(pos, ParseErrorKind::Syntax { instr, expected })
@@ -438,7 +449,7 @@ fn chain(line: &LogicalLine, instr: &'static str) -> Result<Vec<ChainElem>> {
                 Some(other) => return Err(syntax(other.pos(), instr, CHAIN_FORM)),
                 None => return Err(syntax(line.pos, instr, CHAIN_FORM)),
             };
-            let (name, pin) = split_pin(name_token, instr)?;
+            let (name, pin) = split_pin(name_token, instr, NAME_FORM)?;
             if pin.is_some() {
                 return Err(parse_err(name_token.pos, ParseErrorKind::PinNotAllowed));
             }
@@ -476,18 +487,8 @@ fn run(line: &LogicalLine) -> Result<Item> {
     let Some((name_token, rest)) = words.split_first() else {
         return Err(syntax(line.pos, "RUN", RUN_FORM));
     };
-    let (name, pin) = split_pin(name_token, "RUN")?;
-    let pin = match pin {
-        None => None,
-        Some(digits) => Some(parse_pin(&digits).ok_or_else(|| {
-            parse_err(
-                name_token.pos,
-                ParseErrorKind::InvalidNumber {
-                    what: "version pin",
-                },
-            )
-        })?),
-    };
+    let (name, pin) = split_pin(name_token, "RUN", NAME_FORM)?;
+    let pin = pin_number(pin, name_token)?;
     let (flags, only) = parse_flags(rest, "RUN", true)?;
     Ok(Item::Run {
         name,
@@ -498,19 +499,88 @@ fn run(line: &LogicalLine) -> Result<Item> {
     })
 }
 
+/// `INVOKE <recipe>[@N] [name=value ...]`.
+fn invoke(line: &LogicalLine) -> Result<Item> {
+    let words = line.words()?;
+    let Some((name_token, rest)) = words.split_first() else {
+        return Err(syntax(line.pos, "INVOKE", INVOKE_FORM));
+    };
+    let (name, pin) = split_pin(name_token, "INVOKE", RECIPE_NAME_FORM)?;
+    let pin = pin_number(pin, name_token)?;
+
+    let mut assigns = Vec::with_capacity(rest.len());
+    let mut seen = HashSet::new();
+    for token in rest {
+        let Some((name_part, value_part)) = split_assign(token) else {
+            return Err(syntax(token.pos, "INVOKE", ASSIGN_FORM));
+        };
+        let arg = match name_part.as_slice() {
+            [RawSegment::Bare(text)] if is_arg_name(text) => text.clone(),
+            _ => {
+                let shown = Token {
+                    segments: name_part,
+                    pos: token.pos,
+                };
+                return Err(parse_err(
+                    token.pos,
+                    ParseErrorKind::InvalidArgName {
+                        name: shown.display(),
+                    },
+                ));
+            }
+        };
+        if !seen.insert(arg.clone()) {
+            return Err(parse_err(
+                token.pos,
+                ParseErrorKind::Duplicate {
+                    what: format!("INVOKE argument {arg}"),
+                },
+            ));
+        }
+        assigns.push((arg, to_word(&value_part, token), token.pos));
+    }
+    Ok(Item::Invoke {
+        name,
+        pin,
+        assigns,
+        pos: line.pos,
+    })
+}
+
 /// Split a bare `name` or `name@N` token. Returns the name and the pin text.
-fn split_pin(token: &Token, instr: &'static str) -> Result<(String, Option<String>)> {
+/// `name_form` is the expected text for a malformed name.
+fn split_pin(
+    token: &Token,
+    instr: &'static str,
+    name_form: &'static str,
+) -> Result<(String, Option<String>)> {
     let Some(text) = token.bare_text() else {
-        return Err(syntax(token.pos, instr, NAME_FORM));
+        return Err(syntax(token.pos, instr, name_form));
     };
     let (name, pin) = match text.split_once('@') {
         Some((name, pin)) => (name, Some(pin.to_string())),
         None => (text, None),
     };
     if !is_name(name) {
-        return Err(syntax(token.pos, instr, NAME_FORM));
+        return Err(syntax(token.pos, instr, name_form));
     }
     Ok((name.to_string(), pin))
+}
+
+/// Turn pin text into a version number (decimal, >= 1), or InvalidNumber at
+/// the name token.
+fn pin_number(pin: Option<String>, token: &Token) -> Result<Option<u32>> {
+    let Some(digits) = pin else {
+        return Ok(None);
+    };
+    parse_pin(&digits).map(Some).ok_or_else(|| {
+        parse_err(
+            token.pos,
+            ParseErrorKind::InvalidNumber {
+                what: "version pin",
+            },
+        )
+    })
 }
 
 /// A version pin: decimal, >= 1, fits u32.
@@ -661,7 +731,10 @@ mod tests {
         ParseErrorKind::Syntax { instr, expected }
     }
 
-    use super::{CHAIN_FORM, FLAG_FORM, NAME_FORM, ONLY_FORM, RUN_FORM};
+    use super::{
+        ASSIGN_FORM, CHAIN_FORM, FLAG_FORM, INVOKE_FORM, NAME_FORM, ONLY_FORM, RECIPE_NAME_FORM,
+        RUN_FORM,
+    };
 
     const COPY_FORM: &str = "COPY <src> <dest> AS <key>";
 
@@ -1186,7 +1259,7 @@ mod tests {
         }
     }
 
-    /// Test 33 (RUN rows; C4 adds the INVOKE rows): malformed RUN lines.
+    /// Test 33 (RUN and INVOKE rows): malformed RUN and INVOKE lines.
     #[test]
     fn run_and_invoke_malformed_errors() {
         let bad_pin = ParseErrorKind::InvalidNumber {
@@ -1210,6 +1283,30 @@ mod tests {
                 },
                 21,
             ),
+            ("INVOKE", syntax("INVOKE", INVOKE_FORM), 1),
+            ("INVOKE base repo", syntax("INVOKE", ASSIGN_FORM), 13),
+            (
+                "INVOKE base a=1 a=2",
+                ParseErrorKind::Duplicate {
+                    what: "INVOKE argument a".into(),
+                },
+                17,
+            ),
+            (
+                "INVOKE base@0",
+                ParseErrorKind::InvalidNumber {
+                    what: "version pin",
+                },
+                8,
+            ),
+            ("INVOKE \"base\"", syntax("INVOKE", RECIPE_NAME_FORM), 8),
+            (
+                "INVOKE base my-arg=1",
+                ParseErrorKind::InvalidArgName {
+                    name: "my-arg".into(),
+                },
+                13,
+            ),
         ];
         for (source, kind, col) in cases {
             assert_eq!(
@@ -1217,6 +1314,49 @@ mod tests {
                 (kind, 1, col),
                 "malformed RUN {source:?}"
             );
+        }
+    }
+
+    /// Test 34: INVOKE with a pin and assignments (quoted and variable values).
+    #[test]
+    fn invoke_parses_pin_and_assignments() {
+        match ast("INVOKE base@3 repo=a msg=\"x y\" out=${o}")
+            .items
+            .as_slice()
+        {
+            [
+                Item::Invoke {
+                    name,
+                    pin,
+                    assigns,
+                    pos,
+                },
+            ] => {
+                assert_eq!(name, "base", "recipe name");
+                assert_eq!(*pin, Some(3), "version pin");
+                let shown: Vec<(String, String, Position)> = assigns
+                    .iter()
+                    .map(|(arg, word, at)| (arg.clone(), word.display(), *at))
+                    .collect();
+                assert_eq!(
+                    shown,
+                    vec![
+                        ("repo".into(), "a".into(), Position::new(1, 15)),
+                        ("msg".into(), "x y".into(), Position::new(1, 22)),
+                        ("out".into(), "${o}".into(), Position::new(1, 32)),
+                    ],
+                    "assignments with values and positions"
+                );
+                assert_eq!(*pos, Position::new(1, 1), "INVOKE position");
+            }
+            other => panic!("expected one INVOKE, got {other:?}"),
+        }
+        match ast("INVOKE base").items.as_slice() {
+            [Item::Invoke { pin, assigns, .. }] => {
+                assert_eq!(*pin, None, "no pin");
+                assert!(assigns.is_empty(), "no assignments");
+            }
+            other => panic!("expected one INVOKE, got {other:?}"),
         }
     }
 }

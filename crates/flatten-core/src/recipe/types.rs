@@ -15,12 +15,19 @@ pub struct Position {
     pub line: u32,
     /// 1-based column, in characters.
     pub col: u32,
+    /// `build_recipe_versions.id` of the recipe the position is in, for
+    /// instructions expanded from an INVOKE; `None` for the root recipe.
+    pub recipe_version_id: Option<i64>,
 }
 
 impl Position {
-    /// Build a position from a 1-based line and column.
+    /// Build a root-recipe position from a 1-based line and column.
     pub(crate) fn new(line: u32, col: u32) -> Self {
-        Position { line, col }
+        Position {
+            line,
+            col,
+            recipe_version_id: None,
+        }
     }
 }
 
@@ -31,8 +38,22 @@ pub struct Recipe {
     pub args: Vec<Arg>,
     /// Instructions in execution (file) order.
     pub instructions: Vec<Instruction>,
+    /// Every recipe version expanded through INVOKE, nested ones included,
+    /// in first-seen order and without duplicates.
+    pub invoked_versions: Vec<InvokedVersion>,
     /// Root ARGs left symbolic in Open mode, in file order. Empty in Bound mode.
     pub unbound: Vec<String>,
+}
+
+/// A recipe version expanded through INVOKE.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InvokedVersion {
+    /// `build_recipe_versions.id`.
+    pub version_id: i64,
+    /// The invoked recipe's name.
+    pub name: String,
+    /// The version number.
+    pub version: u32,
 }
 
 /// One `ARG name[=default]` declaration.
