@@ -239,8 +239,8 @@ pub enum ParseErrorKind {
         /// The accepted form.
         expected: &'static str,
     },
-    /// A repeated member: a flag within one transform, and (from later
-    /// chunks) block members such as a second OVERRIDE_WITH.
+    /// A repeated member: a flag within one transform, a second
+    /// OVERRIDE_WITH in a COPY, or a repeated INVOKE assignment.
     #[error("duplicate {what}")]
     Duplicate {
         /// What repeated, e.g. `flag --format`.

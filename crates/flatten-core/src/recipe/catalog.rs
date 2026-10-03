@@ -81,6 +81,8 @@ pub trait Catalog {
 }
 
 /// A catalog with one recipe name answered from pending (unsaved) text.
+// SPEC-DEVIATION(EX-001): the spec gives `name: String`. It is borrowed: the
+// overlay lives only inside `analyze`, next to the name it borrows.
 pub(crate) struct PendingOverlay<'a> {
     inner: &'a dyn Catalog,
     name: &'a str,

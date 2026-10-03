@@ -373,7 +373,7 @@ impl Expander<'_> {
                         arg: name.to_string(),
                         invoked: binding.invoked.clone(),
                         caller: binding.caller.clone(),
-                        arg_pos: pos,
+                        arg_pos: frame.stamp(pos),
                     },
                 })?,
             None => match (self.input, default_value) {
@@ -1610,6 +1610,7 @@ mod tests {
             ("ARG a=ra\nINVOKE base", "ra-db-dc/"),
             ("ARG x=X\nINVOKE base a=${x}", "X-db-dc/"),
             ("INVOKE base", "da-db-dc/"),
+            ("INVOKE base\nARG a=ra", "da-db-dc/"),
         ];
         for (source, dest) in cases {
             let recipe = run_with(source, &ArgInput::Open, &catalog);
@@ -1652,7 +1653,11 @@ mod tests {
             arg: "repo".into(),
             invoked: "req@1".into(),
             caller: caller.into(),
-            arg_pos: Position::new(1, 1),
+            arg_pos: Position {
+                line: 1,
+                col: 1,
+                recipe_version_id: Some(21),
+            },
         };
         let named_top = RootRef::Pending {
             name: Some("top".into()),
@@ -1922,7 +1927,7 @@ mod tests {
             let below = format!("INVOKE l{}\nINVOKE l{}", k - 1, k - 1);
             fan = fan.with_recipe(&format!("l{k}"), 100 + k, 1, &[(1, 200 + k, &below)]);
         }
-        let (kind, _) = located(
+        let (kind, location) = located(
             analyze("INVOKE l14", &ArgInput::Open, &fan, &INPUT),
             "fan-out",
         );
@@ -1930,6 +1935,41 @@ mod tests {
             kind,
             ParseErrorKind::ExpansionTooLarge,
             "fan-out past 10,000 instructions is rejected"
+        );
+        assert_eq!(
+            (location.source, location.via.len()),
+            (invoked("l0", 1), 15),
+            "reported at the RUN that crossed the limit, inside l0, via the root and l14 to l1"
+        );
+
+        // Exact boundary: ten recipes of 1,000 RUN lines are 10,000
+        // instructions and pass; one more RUN in the root fails there.
+        let thousand = vec!["RUN flatten"; 1000].join("\n");
+        let mut exact = MemCatalog::builtins();
+        for b in 1..=10 {
+            exact = exact.with_recipe(&format!("b{b}"), 500 + b, 1, &[(1, 600 + b, &thousand)]);
+        }
+        let ten: String = (1..=10).map(|b| format!("INVOKE b{b}\n")).collect();
+        assert!(
+            analyze(&ten, &ArgInput::Open, &exact, &INPUT).is_ok(),
+            "exactly 10,000 instructions are allowed"
+        );
+        let (kind, location) = located(
+            analyze(
+                &format!("{ten}RUN flatten"),
+                &ArgInput::Open,
+                &exact,
+                &INPUT,
+            ),
+            "10,001",
+        );
+        assert_eq!(
+            (kind, location),
+            (
+                ParseErrorKind::ExpansionTooLarge,
+                at(11, 1, SourceRef::Root, vec![])
+            ),
+            "the 10,001st instruction is rejected where it is emitted"
         );
     }
 

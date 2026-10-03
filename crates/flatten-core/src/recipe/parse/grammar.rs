@@ -732,8 +732,8 @@ mod tests {
     }
 
     use super::{
-        ASSIGN_FORM, CHAIN_FORM, FLAG_FORM, INVOKE_FORM, NAME_FORM, ONLY_FORM, RECIPE_NAME_FORM,
-        RUN_FORM,
+        ASSIGN_FORM, CHAIN_FORM, EXCLUDE_FORM, FLAG_FORM, INVOKE_FORM, NAME_FORM, ONLY_FORM,
+        RECIPE_NAME_FORM, RUN_FORM,
     };
 
     const COPY_FORM: &str = "COPY <src> <dest> AS <key>";
@@ -924,7 +924,7 @@ mod tests {
             ),
             (
                 "SOURCE r:\n  COPY . x/ AS k:\n    EXCLUDE",
-                syntax("EXCLUDE", "EXCLUDE <pattern>... (or --binary)"),
+                syntax("EXCLUDE", EXCLUDE_FORM),
                 3,
                 5,
             ),
@@ -1312,7 +1312,7 @@ mod tests {
             assert_eq!(
                 parse_error(source),
                 (kind, 1, col),
-                "malformed RUN {source:?}"
+                "malformed RUN or INVOKE {source:?}"
             );
         }
     }
