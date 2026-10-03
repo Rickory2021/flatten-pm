@@ -78,11 +78,26 @@ pub struct CopyBlock {
     pub dest: String,
     /// The `AS` key after substitution; unique across the recipe.
     pub key: String,
-    /// The per-file transform chain: the recipe's COPY_DEFAULT_WITH in effect
-    /// at this COPY (empty when none has been declared).
+    /// EXCLUDE entries in file order: gitignore patterns (after
+    /// substitution) and the `--binary` marker.
+    pub excludes: Vec<Exclude>,
+    /// The per-file transform chain: this block's OVERRIDE_WITH when present,
+    /// otherwise the recipe's COPY_DEFAULT_WITH in effect at this COPY (empty
+    /// when none has been declared).
     pub forward_chain: Vec<TransformRef>,
     /// Where the COPY line starts.
     pub position: Position,
+}
+
+/// One EXCLUDE entry.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Exclude {
+    /// A gitignore-syntax pattern, after substitution.
+    Pattern(String),
+    /// `--binary`: exclude files whose extension is in the
+    /// `binary_extensions` setting (expanded at export, EX-004).
+    Binary,
 }
 
 /// A transform at a resolved version, with its arguments.

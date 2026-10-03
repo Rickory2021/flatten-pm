@@ -22,17 +22,25 @@
 // needs a directory transform. `--only` globs go to RunInstruction.scope,
 // never into the transform's args.
 //
-// Implemented so far (plan chunk C2): ARG, COPY_DEFAULT_WITH, SOURCE, COPY,
-// RUN.
+// EXCLUDE patterns are validated with the gitignore matcher once they are
+// final. In open mode a pattern that still holds `${` is skipped (bound mode
+// re-checks it): literal `${` is inexpressible in recipe text, so `${` in
+// open-mode output always means a variable is still symbolic.
+//
+// Implemented so far (plan chunk C3): ARG, COPY_DEFAULT_WITH, SOURCE, COPY
+// with EXCLUDE and OVERRIDE_WITH, RUN.
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::ast::{Ast, ChainElem, CopyAst, Flag, Item, Segment, Word};
+use ignore::gitignore::GitignoreBuilder;
+
+use super::ast::{Ast, ChainElem, CopyAst, ExcludeAst, Flag, Item, Segment, Word};
 use super::path::{canonical_copy_shape, check_key, normalize_rel_path};
 use crate::recipe::catalog::{Catalog, TransformInfo, TransformScope};
 use crate::recipe::error::{Error, Location, ParseErrorKind, Result, parse_err};
 use crate::recipe::types::{
-    Arg, CopyBlock, Instruction, Position, Recipe, RunInstruction, SourceInstruction, TransformRef,
+    Arg, CopyBlock, Exclude, Instruction, Position, Recipe, RunInstruction, SourceInstruction,
+    TransformRef,
 };
 
 /// ARG values for resolution.
@@ -54,10 +62,11 @@ pub struct Resolution {
 
 /// The ARG environment and default chain of one recipe.
 // SPEC-DEVIATION(EX-001): the spec's frame also holds a `symbolic` flag per
-// value and a `declared` list. Both land with their first readers (the
-// symbolic flag in C3 for EXCLUDE validation, declaration order in C4 for
-// INVOKE binding step 2), per plan rule 2. Until then `recipe.args` carries
-// ARG order and `env` answers membership.
+// value and a `declared` list. The flag is not needed: open-mode symbolic
+// detection scans for `${` instead (see the module header; decided in C3).
+// The `declared` list lands with its first reader, INVOKE binding step 2, in
+// C4 (plan rule 2). Until then `recipe.args` carries ARG order and `env`
+// answers membership.
 #[derive(Default)]
 struct Frame {
     env: HashMap<String, String>,
@@ -150,7 +159,7 @@ pub(crate) fn resolve(ast: &Ast, input: &ArgInput, catalog: &dyn Catalog) -> Res
                 }
                 let mut blocks = Vec::with_capacity(copies.len());
                 for copy in copies {
-                    blocks.push(copy_block(copy, &frame, &mut keys)?);
+                    blocks.push(copy_block(copy, &frame, &mut keys, input, catalog)?);
                 }
                 recipe
                     .instructions
@@ -176,6 +185,8 @@ fn copy_block(
     copy: &CopyAst,
     frame: &Frame,
     keys: &mut HashMap<String, Location>,
+    input: &ArgInput,
+    catalog: &dyn Catalog,
 ) -> Result<CopyBlock> {
     let src = substituted_path(&copy.src, frame)?;
     let dest = substituted_path(&copy.dest, frame)?;
@@ -204,13 +215,44 @@ fn copy_block(
     }
     keys.insert(key.clone(), Location::root(copy.key.pos));
 
+    let mut excludes = Vec::with_capacity(copy.excludes.len());
+    for entry in &copy.excludes {
+        excludes.push(match entry {
+            ExcludeAst::Binary => Exclude::Binary,
+            ExcludeAst::Pattern(word) => Exclude::Pattern(exclude_pattern(word, frame, input)?),
+        });
+    }
+
+    let forward_chain = match &copy.override_with {
+        Some(chain) => resolve_chain(chain, frame, catalog)?,
+        None => frame.default_chain.clone(),
+    };
+
     Ok(CopyBlock {
         src,
         dest,
         key,
-        forward_chain: frame.default_chain.clone(),
+        excludes,
+        forward_chain,
         position: copy.pos,
     })
+}
+
+/// Substitute an EXCLUDE pattern and validate it with the gitignore matcher,
+/// unless open mode leaves it symbolic.
+fn exclude_pattern(word: &Word, frame: &Frame, input: &ArgInput) -> Result<String> {
+    let pattern = substitute(word, frame)?;
+    let symbolic = matches!(input, ArgInput::Open) && pattern.contains("${");
+    if !symbolic && let Err(e) = GitignoreBuilder::new("").add_line(None, &pattern) {
+        return Err(parse_err(
+            word.pos,
+            ParseErrorKind::InvalidPattern {
+                pattern,
+                reason: e.to_string(),
+            },
+        ));
+    }
+    Ok(pattern)
 }
 
 /// Resolve a COPY chain: every element must be a file transform.
@@ -320,7 +362,7 @@ mod tests {
     use crate::recipe::catalog::{MemCatalog, TransformScope};
     use crate::recipe::error::{Error, Location, ParseErrorKind, PathIssue};
     use crate::recipe::types::{
-        Instruction, Position, Recipe, RunInstruction, SourceInstruction, TransformRef,
+        Exclude, Instruction, Position, Recipe, RunInstruction, SourceInstruction, TransformRef,
     };
     use crate::recipe::{ArgInput, analyze};
 
@@ -392,12 +434,13 @@ mod tests {
         chain.iter().map(|t| t.name.as_str()).collect()
     }
 
-    /// Test 39 (C1 and C2 rows): every substitutable argument substitutes.
+    /// Test 39 (C1, C2, and C3 rows): every substitutable argument substitutes.
     #[test]
     fn substitutes_in_every_target() {
         let source = "ARG repo\nARG sub\nARG set\nARG fmt\n\
                       COPY_DEFAULT_WITH [enrichment-injection --template-set ${set}]\n\
-                      SOURCE ${repo}:\n  COPY ${sub}/ ${repo}/${sub}/ AS ${repo}-${sub}\n\
+                      SOURCE ${repo}:\n  COPY ${sub}/ ${repo}/${sub}/ AS ${repo}-${sub}:\n\
+                      \x20   EXCLUDE ${sub}/*.tmp\n\
                       RUN pack --format ${fmt} --only ${repo}/** ${sub}/*.rs";
         let recipe = run(
             source,
@@ -414,6 +457,11 @@ mod tests {
         assert_eq!(copy.src, "lib/", "COPY src substituted");
         assert_eq!(copy.dest, "repo-a/lib/", "COPY dest substituted");
         assert_eq!(copy.key, "repo-a-lib", "COPY key substituted");
+        assert_eq!(
+            copy.excludes,
+            vec![Exclude::Pattern("lib/*.tmp".into())],
+            "EXCLUDE pattern substituted"
+        );
         assert_eq!(
             copy.forward_chain[0]
                 .args
@@ -487,7 +535,7 @@ mod tests {
         }
     }
 
-    /// Test 42 (C1 rows): open mode keeps required ARGs symbolic and checks defaults as final.
+    /// Test 42 (C1 and C3 rows): open mode keeps required ARGs symbolic and checks defaults as final.
     #[test]
     fn open_mode_keeps_unbound_symbolic_and_checks_defaults() {
         let recipe = run(
@@ -535,6 +583,18 @@ mod tests {
             ),
             "a literal .. inside a symbolic dest still errors"
         );
+
+        // `{${p}` is not a valid glob as literal text (an unclosed `{`), so
+        // passing here shows open mode skips validating a symbolic pattern.
+        let skipped = run(
+            "ARG p\nSOURCE r:\n  COPY . x/ AS k:\n    EXCLUDE {${p}",
+            &ArgInput::Open,
+        );
+        assert_eq!(
+            first_source(&skipped).copies[0].excludes,
+            vec![Exclude::Pattern("{${p}".into())],
+            "a symbolic EXCLUDE pattern is recorded unvalidated in open mode"
+        );
     }
 
     /// Test 43: bound mode requires every ARG without a default.
@@ -580,7 +640,7 @@ mod tests {
         }
     }
 
-    /// Test 46 (C1 rows): values that open mode could not see are checked once bound.
+    /// Test 46 (C1 and C3 rows): values that open mode could not see are checked once bound.
     #[test]
     fn bound_mode_revalidates_substituted_values() {
         let cases = [
@@ -633,6 +693,50 @@ mod tests {
                 "{source:?} with v = {value:?}"
             );
         }
+
+        // EXCLUDE: the matcher's reason text is not asserted (it belongs to
+        // the ignore crate); the variant, pattern, and position are.
+        let excludes = [
+            (
+                "ARG v\nSOURCE r:\n  COPY . x/ AS k:\n    EXCLUDE ${v}",
+                "[z-a]",
+                "[z-a]",
+            ),
+            (
+                "ARG v\nSOURCE r:\n  COPY . x/ AS k:\n    EXCLUDE {${v}",
+                "a",
+                "{a",
+            ),
+        ];
+        for (source, value, pattern) in excludes {
+            assert!(
+                open_ok(source),
+                "{source:?} is valid in open mode while v is symbolic"
+            );
+            match run_err(source, &bound(&[("v", value)])) {
+                Error::Parse { location, kind } => {
+                    assert!(
+                        matches!(&kind, ParseErrorKind::InvalidPattern { pattern: p, .. } if p == pattern),
+                        "{source:?} with v = {value:?}: expected InvalidPattern for {pattern:?}, got {kind:?}"
+                    );
+                    assert_eq!(
+                        (location.line, location.col),
+                        (4, 13),
+                        "the error points at the pattern word"
+                    );
+                }
+                other => panic!("expected a parse error, got {other:?}"),
+            }
+        }
+        let valid_once_bound = run(
+            "ARG v\nSOURCE r:\n  COPY . x/ AS k:\n    EXCLUDE {${v}",
+            &bound(&[("v", "a,b}")]),
+        );
+        assert_eq!(
+            first_source(&valid_once_bound).copies[0].excludes,
+            vec![Exclude::Pattern("{a,b}".into())],
+            "the same symbolic pattern passes validation once its value completes it"
+        );
     }
 
     /// Test 52: keys collide after substitution, in both modes.
@@ -722,7 +826,36 @@ mod tests {
         }
     }
 
-    /// Test 47 (C2 rows): COPY_DEFAULT_WITH is sequential; absent means empty.
+    /// Test 54: literal EXCLUDE patterns the gitignore matcher rejects.
+    #[test]
+    fn invalid_exclude_pattern_errors() {
+        let cases = [
+            ("EXCLUDE [z-a]", "[z-a]", 13),
+            ("EXCLUDE ok/ {a,b", "{a,b", 17),
+            ("EXCLUDE \"a\\\\\"", "a\\", 13),
+        ];
+        for (member, pattern, col) in cases {
+            let source = format!("SOURCE r:\n  COPY . x/ AS k:\n    {member}");
+            for input in [ArgInput::Open, bound(&[])] {
+                match run_err(&source, &input) {
+                    Error::Parse { location, kind } => {
+                        assert!(
+                            matches!(&kind, ParseErrorKind::InvalidPattern { pattern: p, reason } if p == pattern && !reason.is_empty()),
+                            "{member:?}: expected InvalidPattern for {pattern:?} with a reason, got {kind:?}"
+                        );
+                        assert_eq!(
+                            (location.line, location.col),
+                            (3, col),
+                            "{member:?}: the error points at the pattern word"
+                        );
+                    }
+                    other => panic!("{member:?}: expected a parse error, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// Test 47 (C2 and C3 rows): COPY_DEFAULT_WITH is sequential; OVERRIDE_WITH replaces it per COPY.
     #[test]
     fn chain_selection_default_override_and_empty() {
         let source = "SOURCE r:\n  COPY a/ a/ AS a\n\
@@ -763,9 +896,32 @@ mod tests {
             (3, 3, 1),
             "the chain element resolves to the catalog row"
         );
+
+        let overrides = run(
+            "COPY_DEFAULT_WITH [enrichment-injection --template-set default]\n\
+             SOURCE r:\n\
+             \x20 COPY a/ a/ AS a:\n    OVERRIDE_WITH [enrichment-trim]\n\
+             \x20 COPY b/ b/ AS b:\n    OVERRIDE_WITH []\n\
+             \x20 COPY c/ c/ AS c",
+            &ArgInput::Open,
+        );
+        let chains: Vec<(String, Vec<&str>)> = first_source(&overrides)
+            .copies
+            .iter()
+            .map(|c| (c.key.clone(), chain_names(&c.forward_chain)))
+            .collect();
+        assert_eq!(
+            chains,
+            vec![
+                ("a".to_string(), vec!["enrichment-trim"]),
+                ("b".to_string(), vec![]),
+                ("c".to_string(), vec!["enrichment-injection"]),
+            ],
+            "OVERRIDE_WITH replaces the default for its COPY only; [] means no transforms"
+        );
     }
 
-    /// Test 48 (C2 rows): COPY chains need file transforms; RUN needs a directory transform.
+    /// Test 48 (C2 and C3 rows): COPY chains need file transforms; RUN needs a directory transform.
     #[test]
     fn scope_mismatch_errors() {
         let wrong = |name: &str, expected, found| ParseErrorKind::WrongScope {
@@ -789,6 +945,12 @@ mod tests {
                 ),
                 1,
                 1,
+            ),
+            (
+                "SOURCE r:\n  COPY . x/ AS k:\n    OVERRIDE_WITH [pack]",
+                wrong("pack", TransformScope::File, TransformScope::Directory),
+                3,
+                20,
             ),
         ];
         for (source, kind, line, col) in cases {

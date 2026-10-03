@@ -12,19 +12,32 @@
 // (value `true`). On RUN, `--only` is reserved and takes every following
 // non-flag token as a glob.
 //
-// Implemented so far (plan chunk C2): ARG, COPY_DEFAULT_WITH, SOURCE, COPY,
-// RUN. Any other first token is an unknown instruction until its chunk lands.
+// COPY blocks take two kinds of members: EXCLUDE (gitignore patterns and the
+// `--binary` marker; any other bare `--` token is an unknown flag) and at
+// most one OVERRIDE_WITH chain.
+//
+// Implemented so far (plan chunk C3): ARG, COPY_DEFAULT_WITH, SOURCE, COPY
+// with EXCLUDE and OVERRIDE_WITH, RUN. Any other first token is an unknown
+// instruction until its chunk lands.
 
 use std::collections::HashSet;
 
-use super::ast::{Ast, ChainElem, CopyAst, Flag, Item, Segment, Word};
+use super::ast::{Ast, ChainElem, CopyAst, ExcludeAst, Flag, Item, Segment, Word};
 use super::lexer::{ChainToken, LogicalLine, RawSegment, Token};
 use super::path::{is_arg_name, is_flag_name, is_name};
 use crate::recipe::error::{Error, ParseErrorKind, Result, parse_err};
 use crate::recipe::types::Position;
 
 /// Instruction keywords implemented so far.
-const KEYWORDS: &[&str] = &["ARG", "COPY_DEFAULT_WITH", "SOURCE", "RUN", "COPY"];
+const KEYWORDS: &[&str] = &[
+    "ARG",
+    "COPY_DEFAULT_WITH",
+    "SOURCE",
+    "RUN",
+    "COPY",
+    "EXCLUDE",
+    "OVERRIDE_WITH",
+];
 /// Keywords that open a block and consume a trailing `:`.
 const BLOCK_KEYWORDS: &[&str] = &["SOURCE", "COPY"];
 
@@ -146,6 +159,13 @@ fn top_level(node: Node) -> Result<Item> {
             run(&node.line)
         }
         Some(("COPY", _)) => Err(parse_err(node.line.pos, ParseErrorKind::CopyOutsideSource)),
+        Some((instr @ ("EXCLUDE" | "OVERRIDE_WITH"), _)) => Err(parse_err(
+            node.line.pos,
+            ParseErrorKind::OutsideBlock {
+                instr,
+                expected: "COPY",
+            },
+        )),
         _ => Err(unknown(&node.line.first)),
     }
 }
@@ -323,15 +343,68 @@ fn copy(node: Node, colon_on_keyword: bool) -> Result<CopyAst> {
         return Err(parse_err(node.line.pos, COPY_SYNTAX));
     }
     require_colon(&node, colon, "COPY")?;
-    if let Some(child) = node.children.first() {
-        return Err(misplaced(child, "COPY"));
+
+    let mut excludes = Vec::new();
+    let mut override_with = None;
+    for child in &node.children {
+        match keyword_of(&child.line.first) {
+            Some(("EXCLUDE", _)) => {
+                no_children(child)?;
+                excludes.extend(exclude(&child.line)?);
+            }
+            Some(("OVERRIDE_WITH", _)) => {
+                no_children(child)?;
+                if override_with.is_some() {
+                    return Err(parse_err(
+                        child.line.pos,
+                        ParseErrorKind::Duplicate {
+                            what: "OVERRIDE_WITH".to_string(),
+                        },
+                    ));
+                }
+                override_with = Some(chain(&child.line, "OVERRIDE_WITH")?);
+            }
+            _ => return Err(misplaced(child, "COPY")),
+        }
     }
+
     Ok(CopyAst {
         src: to_word(&src.segments, src),
         dest: to_word(&dest.segments, dest),
         key: to_word(&key.segments, key),
+        excludes,
+        override_with,
         pos: node.line.pos,
     })
+}
+
+const EXCLUDE_FORM: &str = "EXCLUDE <pattern>... (or --binary)";
+
+/// `EXCLUDE <pattern>...`: each token is a gitignore pattern, except a fully
+/// bare `--binary` (the marker) and any other fully bare `--` token (an
+/// unknown flag; quote it to mean a pattern). A trailing colon is literal.
+fn exclude(line: &LogicalLine) -> Result<Vec<ExcludeAst>> {
+    let tokens = line.words()?;
+    if tokens.is_empty() {
+        return Err(syntax(line.pos, "EXCLUDE", EXCLUDE_FORM));
+    }
+    let mut out = Vec::with_capacity(tokens.len());
+    for token in &tokens {
+        match token.bare_text() {
+            Some("--binary") => out.push(ExcludeAst::Binary),
+            Some(flag) if flag.starts_with("--") => {
+                return Err(parse_err(
+                    token.pos,
+                    ParseErrorKind::UnknownFlag {
+                        instr: "EXCLUDE",
+                        flag: flag.to_string(),
+                    },
+                ));
+            }
+            _ => out.push(ExcludeAst::Pattern(to_word(&token.segments, token))),
+        }
+    }
+    Ok(out)
 }
 
 const CHAIN_FORM: &str = "[transform --flag value, ...]";
@@ -568,7 +641,7 @@ fn to_word(segments: &[RawSegment], token: &Token) -> Word {
 mod tests {
     use crate::recipe::SHIPPED_DEFAULT_RECIPE;
     use crate::recipe::error::{Error, ParseErrorKind};
-    use crate::recipe::parse::ast::{Ast, ChainElem, Flag, Item, Segment};
+    use crate::recipe::parse::ast::{Ast, ChainElem, ExcludeAst, Flag, Item, Segment};
     use crate::recipe::parse::parse;
     use crate::recipe::types::Position;
 
@@ -633,32 +706,161 @@ mod tests {
         );
     }
 
-    /// Test 19 (C1 and C2 rows): known instructions nested in the wrong block.
+    /// Test 19 (C1, C2, and C3 rows): known instructions in the wrong block.
     #[test]
     fn misplaced_instructions_error_with_expected_parent() {
+        let not_in = |instr, parent| ParseErrorKind::NotAllowedIn { instr, parent };
+        let outside = |instr| ParseErrorKind::OutsideBlock {
+            instr,
+            expected: "COPY",
+        };
         let cases = [
-            ("SOURCE r:\n  ARG a", "ARG", "SOURCE", 2, 3),
+            ("SOURCE r:\n  ARG a", not_in("ARG", "SOURCE"), 2, 3),
             (
                 "SOURCE r:\n  COPY . x/ AS k:\n    ARG a",
-                "ARG",
-                "COPY",
+                not_in("ARG", "COPY"),
                 3,
                 5,
             ),
             (
                 "SOURCE r:\n  COPY . x/ AS k:\n    SOURCE s:",
-                "SOURCE",
-                "COPY",
+                not_in("SOURCE", "COPY"),
                 3,
                 5,
             ),
-            ("SOURCE r:\n  RUN flatten", "RUN", "SOURCE", 2, 3),
+            ("SOURCE r:\n  RUN flatten", not_in("RUN", "SOURCE"), 2, 3),
+            ("EXCLUDE *.log", outside("EXCLUDE"), 1, 1),
+            ("OVERRIDE_WITH []", outside("OVERRIDE_WITH"), 1, 1),
+            (
+                "SOURCE r:\n  EXCLUDE *.log",
+                not_in("EXCLUDE", "SOURCE"),
+                2,
+                3,
+            ),
         ];
-        for (source, instr, parent, line, col) in cases {
+        for (source, kind, line, col) in cases {
             assert_eq!(
                 parse_error(source),
-                (ParseErrorKind::NotAllowedIn { instr, parent }, line, col),
+                (kind, line, col),
                 "misplaced instruction in {source:?}"
+            );
+        }
+    }
+
+    /// The members of the only COPY in a one-SOURCE recipe.
+    fn copy_members(source: &str) -> (Vec<ExcludeAst>, Option<Vec<ChainElem>>) {
+        match ast(source).items.as_slice() {
+            [Item::Source { copies, .. }] => match copies.as_slice() {
+                [copy] => (copy.excludes.clone(), copy.override_with.clone()),
+                other => panic!("expected one COPY, got {other:?}"),
+            },
+            other => panic!("expected one SOURCE, got {other:?}"),
+        }
+    }
+
+    fn lit(text: &str) -> Vec<Segment> {
+        vec![Segment::Lit(text.to_string())]
+    }
+
+    fn pattern_texts(excludes: &[ExcludeAst]) -> Vec<String> {
+        excludes
+            .iter()
+            .map(|e| match e {
+                ExcludeAst::Pattern(word) => word.display(),
+                ExcludeAst::Binary => "<binary>".to_string(),
+            })
+            .collect()
+    }
+
+    /// Test 23 (F-17): a trailing colon on a leaf is literal; a quoted colon opens nothing.
+    #[test]
+    fn trailing_colon_on_leaf_and_quoted_colon_are_literal() {
+        let (excludes, _) = copy_members("SOURCE r:\n  COPY . x/ AS k:\n    EXCLUDE foo: bar");
+        assert_eq!(
+            pattern_texts(&excludes),
+            vec!["foo:", "bar"],
+            "EXCLUDE foo: excludes the pattern foo:"
+        );
+        match ast("SOURCE r:\n  COPY . x/ AS \"k:\"").items.as_slice() {
+            [Item::Source { copies, .. }] => assert_eq!(
+                copies[0].key.segments,
+                lit("k:"),
+                "a quoted trailing colon is part of the key, not a block colon"
+            ),
+            other => panic!("expected one SOURCE, got {other:?}"),
+        }
+    }
+
+    /// Test 28 (C3 row; C5 adds the WATCH rows): duplicate block members.
+    #[test]
+    fn duplicate_block_members_error() {
+        let cases = [(
+            "SOURCE r:\n  COPY . x/ AS k:\n    OVERRIDE_WITH []\n    OVERRIDE_WITH [enrichment-trim]",
+            "OVERRIDE_WITH",
+            4,
+            5,
+        )];
+        for (source, what, line, col) in cases {
+            assert_eq!(
+                parse_error(source),
+                (ParseErrorKind::Duplicate { what: what.into() }, line, col),
+                "duplicate member in {source:?}"
+            );
+        }
+    }
+
+    /// Test 35: `--binary` is the marker; it mixes with patterns; quoted `--x` is a pattern.
+    #[test]
+    fn exclude_binary_marker_mixes_with_patterns() {
+        let (excludes, override_with) = copy_members(
+            "SOURCE r:\n  COPY . x/ AS k:\n    EXCLUDE *.log --binary \"--x\"\n    EXCLUDE node_modules/",
+        );
+        assert_eq!(
+            pattern_texts(&excludes),
+            vec!["*.log", "<binary>", "--x", "node_modules/"],
+            "patterns and the marker in file order, across two EXCLUDE lines"
+        );
+        assert!(override_with.is_none(), "no OVERRIDE_WITH declared");
+
+        let (only_binary, _) = copy_members("SOURCE r:\n  COPY . x/ AS k:\n    EXCLUDE --binary");
+        assert_eq!(only_binary, vec![ExcludeAst::Binary], "the marker alone");
+
+        let (_, chain) = copy_members(
+            "SOURCE r:\n  COPY . x/ AS k:\n    OVERRIDE_WITH [enrichment-trim]\n    EXCLUDE a",
+        );
+        let names: Vec<String> = chain
+            .expect("OVERRIDE_WITH is recorded")
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["enrichment-trim"], "members in any order");
+    }
+
+    /// Test 36: an unknown bare `--` flag and an empty EXCLUDE are errors.
+    #[test]
+    fn exclude_unknown_flag_and_empty_error() {
+        let cases = [
+            (
+                "SOURCE r:\n  COPY . x/ AS k:\n    EXCLUDE a --binaries",
+                ParseErrorKind::UnknownFlag {
+                    instr: "EXCLUDE",
+                    flag: "--binaries".into(),
+                },
+                3,
+                15,
+            ),
+            (
+                "SOURCE r:\n  COPY . x/ AS k:\n    EXCLUDE",
+                syntax("EXCLUDE", "EXCLUDE <pattern>... (or --binary)"),
+                3,
+                5,
+            ),
+        ];
+        for (source, kind, line, col) in cases {
+            assert_eq!(
+                parse_error(source),
+                (kind, line, col),
+                "EXCLUDE error in {source:?}"
             );
         }
     }

@@ -8,9 +8,9 @@
 // `types.rs` are the parse output contract (docs/design/3_RECIPES.md).
 // Transform lookups go through the `Catalog` trait (`catalog.rs`).
 //
-// Implemented so far (plan chunk C2): ARG, COPY_DEFAULT_WITH, SOURCE, COPY,
-// and RUN; transform chains; path normalization; the canonical COPY shape;
-// Open/Bound ARG modes.
+// Implemented so far (plan chunk C3): ARG, COPY_DEFAULT_WITH, SOURCE, COPY
+// with EXCLUDE and OVERRIDE_WITH, and RUN; transform chains; path
+// normalization; the canonical COPY shape; Open/Bound ARG modes.
 
 mod catalog;
 mod error;
@@ -21,7 +21,8 @@ pub use catalog::{Catalog, TransformInfo, TransformScope};
 pub use error::{Error, Location, ParseErrorKind, PathIssue, Result, SourceRef};
 pub use parse::resolve::{ArgInput, Resolution};
 pub use types::{
-    Arg, CopyBlock, Instruction, Position, Recipe, RunInstruction, SourceInstruction, TransformRef,
+    Arg, CopyBlock, Exclude, Instruction, Position, Recipe, RunInstruction, SourceInstruction,
+    TransformRef,
 };
 
 /// The shipped generic recipe (`shipped-default`), embedded from

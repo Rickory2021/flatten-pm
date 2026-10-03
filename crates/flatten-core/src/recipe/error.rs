@@ -138,6 +138,14 @@ pub enum ParseErrorKind {
     /// A COPY line outside any SOURCE block.
     #[error("COPY must be inside a SOURCE block")]
     CopyOutsideSource,
+    /// A COPY-member or WATCH-member instruction outside its block.
+    #[error("{instr} must be inside a {expected} block")]
+    OutsideBlock {
+        /// The misplaced instruction.
+        instr: &'static str,
+        /// The block it belongs in.
+        expected: &'static str,
+    },
     /// A known instruction nested under a block that does not allow it.
     #[error("{instr} is not allowed inside {parent}")]
     NotAllowedIn {
@@ -175,6 +183,15 @@ pub enum ParseErrorKind {
     Duplicate {
         /// What repeated, e.g. `flag --format`.
         what: String,
+    },
+    /// A bare `--` token an instruction does not recognize. Quote it to
+    /// mean literal text (`EXCLUDE "--x"`).
+    #[error("unknown {instr} flag {flag} (quote it to use it as a pattern)")]
+    UnknownFlag {
+        /// The instruction.
+        instr: &'static str,
+        /// The flag as written.
+        flag: String,
     },
     /// An `@N` version pin on a COPY chain element.
     #[error("version pins (@N) are only allowed on INVOKE and RUN")]
@@ -230,6 +247,14 @@ pub enum ParseErrorKind {
     /// A SOURCE repo name that is empty after substitution.
     #[error("SOURCE repo name is empty")]
     InvalidRepoName,
+    /// An EXCLUDE pattern the gitignore matcher rejects.
+    #[error("invalid EXCLUDE pattern {pattern:?}: {reason}")]
+    InvalidPattern {
+        /// The pattern after substitution.
+        pattern: String,
+        /// The matcher's error text.
+        reason: String,
+    },
     /// A transform name the catalog does not know.
     #[error("unknown transform {name}")]
     UnknownTransform {

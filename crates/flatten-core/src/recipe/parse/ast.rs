@@ -63,13 +63,22 @@ pub(crate) struct Flag {
     pub value: Word,
 }
 
-/// `COPY <src> <dest> AS <key>` inside a SOURCE.
+/// `COPY <src> <dest> AS <key>` inside a SOURCE, with its members.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CopyAst {
     pub src: Word,
     pub dest: Word,
     pub key: Word,
+    pub excludes: Vec<ExcludeAst>,
+    pub override_with: Option<Vec<ChainElem>>,
     pub pos: Position,
+}
+
+/// One EXCLUDE entry, before substitution.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ExcludeAst {
+    Pattern(Word),
+    Binary,
 }
 
 /// A token awaiting substitution.
