@@ -63,17 +63,13 @@ pub fn path_from_os(path: &std::path::Path) -> Result<(String, bool)> {
                 ));
             }
             Component::ParentDir => {
-                return Err(Error::InvalidPath(
-                    "path contains '..' component".into(),
-                ));
+                return Err(Error::InvalidPath("path contains '..' component".into()));
             }
             Component::RootDir => {
                 return Err(Error::InvalidPath("path is absolute".into()));
             }
             Component::Prefix(_) => {
-                return Err(Error::InvalidPath(
-                    "path contains Windows prefix".into(),
-                ));
+                return Err(Error::InvalidPath("path contains Windows prefix".into()));
             }
         }
     }
@@ -94,7 +90,10 @@ mod tests {
     #[test]
     fn validate_path_valid() {
         assert!(validate_path("a").is_ok(), "single segment should be valid");
-        assert!(validate_path("a/b/c").is_ok(), "multi-segment should be valid");
+        assert!(
+            validate_path("a/b/c").is_ok(),
+            "multi-segment should be valid"
+        );
     }
 
     #[test]

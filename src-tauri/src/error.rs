@@ -92,7 +92,11 @@ mod tests {
         assert_eq!(json["kind"], "domain", "kind field should be domain");
         // Confirm no extra fields
         let obj = json.as_object().unwrap();
-        assert_eq!(obj.len(), 2, "should have exactly two fields: error and kind");
+        assert_eq!(
+            obj.len(),
+            2,
+            "should have exactly two fields: error and kind"
+        );
     }
 
     /// From<db::error::Error> maps to kind "database" with the source message.
@@ -100,7 +104,10 @@ mod tests {
     fn command_error_from_db_error() {
         let db_err = flatten_core::db::error::Error::Writer("test writer error".into());
         let cmd_err = CommandError::from(db_err);
-        assert_eq!(cmd_err.kind, "database", "db errors should map to database kind");
+        assert_eq!(
+            cmd_err.kind, "database",
+            "db errors should map to database kind"
+        );
         assert!(
             cmd_err.error.contains("test writer error"),
             "error message should contain the source message"

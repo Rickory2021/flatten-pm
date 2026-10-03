@@ -74,9 +74,7 @@ fn validate_setting(key: &str, value: &str) -> Result<(), CommandError> {
         }
         SettingType::PositiveInt => {
             let n = value.parse::<u64>().map_err(|_| {
-                CommandError::domain(format!(
-                    "{key} must be a positive integer, got: {value}"
-                ))
+                CommandError::domain(format!("{key} must be a positive integer, got: {value}"))
             })?;
             if n == 0 {
                 return Err(CommandError::domain(format!(
@@ -165,7 +163,10 @@ mod tests {
     #[test]
     fn validate_rejects_non_integer() {
         let result = validate_setting("watch_poll_interval_ms", "abc");
-        assert!(result.is_err(), "non-integer should be rejected for int setting");
+        assert!(
+            result.is_err(),
+            "non-integer should be rejected for int setting"
+        );
         let err = result.unwrap_err();
         assert_eq!(err.kind, "domain", "error kind should be domain");
     }
@@ -197,7 +198,10 @@ mod tests {
     #[test]
     fn validate_accepts_empty_path() {
         let result = validate_setting("watch_source_dir", "");
-        assert!(result.is_ok(), "empty string should be accepted (means unset)");
+        assert!(
+            result.is_ok(),
+            "empty string should be accepted (means unset)"
+        );
     }
 
     #[test]

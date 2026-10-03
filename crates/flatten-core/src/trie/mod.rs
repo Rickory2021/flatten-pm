@@ -12,8 +12,8 @@ pub mod error;
 mod path;
 mod persist;
 
-pub use path::{path_from_os, validate_path};
 use error::{Error, Result};
+pub use path::{path_from_os, validate_path};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -268,9 +268,7 @@ impl Trie {
             Some(idx) => {
                 // If replacing a directory, free its entire subtree first
                 let child_indices: Vec<NodeIndex> = match &self.arena[idx.0 as usize] {
-                    NodeKind::Dir { children, .. } => {
-                        children.iter().map(|(_, ci)| *ci).collect()
-                    }
+                    NodeKind::Dir { children, .. } => children.iter().map(|(_, ci)| *ci).collect(),
                     _ => Vec::new(),
                 };
                 for ci in child_indices {
@@ -319,9 +317,7 @@ impl Trie {
     /// Inserts all leaves without per-insert Merkle recomputation, then does
     /// one post-order pass over the entire tree. O(N) total hashing instead
     /// of O(N x depth). Duplicate paths: last wins.
-    pub fn from_leaves(
-        leaves: impl IntoIterator<Item = (String, LeafNode)>,
-    ) -> Result<Trie> {
+    pub fn from_leaves(leaves: impl IntoIterator<Item = (String, LeafNode)>) -> Result<Trie> {
         let mut trie = Trie::new();
         for (path, leaf) in leaves {
             trie.insert_unhashed(&path, leaf)?;
@@ -362,9 +358,7 @@ impl Trie {
 
         for &segment in &segments[..segments.len() - 1] {
             match self.find_child(current, segment) {
-                Some(idx)
-                    if matches!(&self.arena[idx.0 as usize], NodeKind::Dir { .. }) =>
-                {
+                Some(idx) if matches!(&self.arena[idx.0 as usize], NodeKind::Dir { .. }) => {
                     path_nodes.push(idx);
                     current = idx;
                 }
@@ -807,17 +801,15 @@ mod tests {
         let mut trie = Trie::new();
         trie.insert("dir/file.txt", leaf([1u8; 32]))
             .expect("insert should succeed");
-        assert!(
-            !trie.has("dir"),
-            "has should return false for a directory"
-        );
+        assert!(!trie.has("dir"), "has should return false for a directory");
     }
 
     #[test]
     fn leaf_hash_returns_content_hash() {
         let mut trie = Trie::new();
         let h = [99u8; 32];
-        trie.insert("f.txt", leaf(h)).expect("insert should succeed");
+        trie.insert("f.txt", leaf(h))
+            .expect("insert should succeed");
         assert_eq!(
             trie.leaf_hash("f.txt"),
             Some(h),
@@ -833,13 +825,18 @@ mod tests {
             .expect("insert should succeed");
 
         let hash = trie.subtree_hash("dir");
-        assert!(hash.is_some(), "subtree_hash should return Some for a directory");
+        assert!(
+            hash.is_some(),
+            "subtree_hash should return Some for a directory"
+        );
 
         // Cross-check: subtree_hash("dir") must equal root_hash() of a fresh
         // trie containing only "a.txt" with the same content hash, because both
         // are the Merkle of the single child ("a.txt", h).
         let mut fresh = Trie::new();
-        fresh.insert("a.txt", leaf(h)).expect("insert should succeed");
+        fresh
+            .insert("a.txt", leaf(h))
+            .expect("insert should succeed");
         assert_eq!(
             hash.unwrap(),
             fresh.root_hash(),
@@ -875,11 +872,15 @@ mod tests {
     fn stat_metadata_roundtrip() {
         let mut trie = Trie::new();
         let l = leaf_with_stat([0u8; 32], 4096, 1_718_000_000_123_456_789);
-        trie.insert("file", l.clone()).expect("insert should succeed");
+        trie.insert("file", l.clone())
+            .expect("insert should succeed");
 
         let got = trie.get("file").expect("should find the leaf");
         assert_eq!(got.size, 4096, "size should roundtrip");
-        assert_eq!(got.mtime, 1_718_000_000_123_456_789, "mtime should roundtrip");
+        assert_eq!(
+            got.mtime, 1_718_000_000_123_456_789,
+            "mtime should roundtrip"
+        );
 
         // Two mtimes differing only in sub-second portion are distinct
         let l2 = leaf_with_stat([0u8; 32], 4096, 1_718_000_000_123_456_790);
@@ -1146,10 +1147,8 @@ mod tests {
 
     #[test]
     fn from_leaves_duplicate_last_wins() {
-        let entries: Vec<(String, LeafNode)> = vec![
-            ("f".into(), leaf([1u8; 32])),
-            ("f".into(), leaf([2u8; 32])),
-        ];
+        let entries: Vec<(String, LeafNode)> =
+            vec![("f".into(), leaf([1u8; 32])), ("f".into(), leaf([2u8; 32]))];
 
         let trie = Trie::from_leaves(entries).expect("from_leaves should succeed");
         assert_eq!(

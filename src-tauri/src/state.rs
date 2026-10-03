@@ -52,8 +52,7 @@ pub fn init_app_state() -> Result<AppState, String> {
 
     let db_path = data_dir.join("flatten.db");
 
-    let writer = Writer::open(&db_path)
-        .map_err(|e| format!("failed to open database: {e}"))?;
+    let writer = Writer::open(&db_path).map_err(|e| format!("failed to open database: {e}"))?;
 
     Ok(AppState {
         writer,

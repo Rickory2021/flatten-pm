@@ -174,19 +174,19 @@ impl Drop for Writer {
 mod tests {
     use super::*;
     use crate::db::{error, open_reader};
- 
+
     /// Helper: create a temp db, open a Writer, return both (tempfile stays alive).
     fn test_writer() -> (tempfile::NamedTempFile, Writer) {
         let tmp = tempfile::NamedTempFile::new().expect("failed to create temp file");
         let writer = Writer::open(tmp.path()).expect("Writer::open failed");
         (tmp, writer)
     }
- 
+
     /// Foreign key constraint rejects a child row referencing a nonexistent parent.
     #[test]
     fn fk_rejects_bad_reference() {
         let (_tmp, writer) = test_writer();
- 
+
         let result = writer.call_write(|conn| {
             conn.execute(
                 "INSERT INTO repo_versions (repo_id, version, ingest_patterns, line_ending_policy) VALUES (9999, 1, '[]', 'preserve')",
@@ -194,188 +194,194 @@ mod tests {
             ).map_err(error::Error::from)?;
             Ok(())
         });
- 
+
         assert!(result.is_err(), "expected FK violation, got Ok");
     }
- 
+
     /// Deleting a pipeline_binding cascades to its export_state row.
     #[test]
     fn fk_cascade_binding_to_export_state() {
         let (_tmp, writer) = test_writer();
- 
+
         writer.call_write(|conn| {
             conn.execute(
                 "INSERT INTO build_recipes (name, curation) VALUES ('test-cascade', 'custom')",
                 [],
             ).map_err(error::Error::from)?;
             let recipe_id = conn.last_insert_rowid();
- 
+
             conn.execute(
                 "INSERT INTO pipeline_bindings (build_recipe_id, active) VALUES (?1, 0)",
                 [recipe_id],
             ).map_err(error::Error::from)?;
             let binding_id = conn.last_insert_rowid();
- 
+
             conn.execute(
                 "INSERT INTO export_state (pipeline_binding_id, output_dir, resolution_rules, runtime_versions, runtime_inputs, repo_root_hashes) VALUES (?1, 'out/', '{}', '{}', '{}', '{}')",
                 [binding_id],
             ).map_err(error::Error::from)?;
- 
+
             let count: i32 = conn.query_row(
                 "SELECT count(*) FROM export_state WHERE pipeline_binding_id = ?1",
                 [binding_id], |row| row.get(0),
             )?;
             assert_eq!(count, 1);
- 
+
             conn.execute(
                 "DELETE FROM pipeline_bindings WHERE id = ?1",
                 [binding_id],
             ).map_err(error::Error::from)?;
- 
+
             let count: i32 = conn.query_row(
                 "SELECT count(*) FROM export_state WHERE pipeline_binding_id = ?1",
                 [binding_id], |row| row.get(0),
             )?;
             assert_eq!(count, 0, "export_state should have been cascaded");
- 
+
             Ok(())
         }).expect("cascade test failed");
     }
- 
+
     /// Deleting a build_recipe_version sets file_history.build_recipe_version_id to NULL.
     #[test]
     fn fk_set_null_version_to_file_history() {
         let (_tmp, writer) = test_writer();
- 
+
         writer.call_write(|conn| {
             conn.execute(
                 "INSERT INTO build_recipes (name, curation) VALUES ('test-setnull', 'custom')",
                 [],
             ).map_err(error::Error::from)?;
             let recipe_id = conn.last_insert_rowid();
- 
+
             conn.execute(
                 "INSERT INTO build_recipe_versions (build_recipe_id, version, source) VALUES (?1, 1, 'test')",
                 [recipe_id],
             ).map_err(error::Error::from)?;
             let version_id = conn.last_insert_rowid();
- 
+
             conn.execute(
                 "INSERT INTO file_history (build_recipe_version_id, file_path, entry_type, content, placed_by) VALUES (?1, 'test.txt', 'snapshot', X'00', 'export')",
                 [version_id],
             ).map_err(error::Error::from)?;
- 
+
             conn.execute(
                 "DELETE FROM build_recipe_versions WHERE id = ?1",
                 [version_id],
             ).map_err(error::Error::from)?;
- 
+
             let fh_version: Option<i64> = conn.query_row(
                 "SELECT build_recipe_version_id FROM file_history WHERE file_path = 'test.txt'",
                 [], |row| row.get(0),
             )?;
             assert_eq!(fh_version, None, "should be NULL after SET NULL cascade");
- 
+
             Ok(())
         }).expect("set null test failed");
     }
- 
+
     /// Two sequential Writer::open calls on the same database both succeed.
     #[test]
     fn concurrent_init_both_succeed() {
         let tmp = tempfile::NamedTempFile::new().expect("failed to create temp file");
- 
+
         let writer1 = Writer::open(tmp.path());
         assert!(writer1.is_ok(), "first open failed: {:?}", writer1.err());
         drop(writer1);
- 
+
         let writer2 = Writer::open(tmp.path());
         assert!(writer2.is_ok(), "second open failed: {:?}", writer2.err());
     }
- 
+
     /// Opening the same database twice leaves the schema intact.
     #[test]
     fn idempotent_open_preserves_schema() {
         let tmp = tempfile::NamedTempFile::new().expect("failed to create temp file");
- 
+
         let w1 = Writer::open(tmp.path()).expect("first open failed");
         drop(w1);
         let w2 = Writer::open(tmp.path()).expect("second open failed");
         drop(w2);
- 
+
         let conn = open_reader(tmp.path()).expect("open_reader failed");
         let count: i32 = conn
             .prepare("SELECT count(*) FROM sqlite_master WHERE type='table'")
             .unwrap()
             .query_row([], |row| row.get(0))
             .unwrap();
-        assert_eq!(count, 16, "schema should still have 16 tables after re-open");
+        assert_eq!(
+            count, 16,
+            "schema should still have 16 tables after re-open"
+        );
     }
 
     /// Builtin transforms cannot be hard-deleted.
     #[test]
     fn builtin_transform_rejects_delete() {
         let (_tmp, writer) = test_writer();
- 
+
         let result = writer.call_write(|conn| {
-            conn.execute(
-                "DELETE FROM transforms WHERE name = 'flatten'",
-                [],
-            ).map_err(error::Error::from)?;
+            conn.execute("DELETE FROM transforms WHERE name = 'flatten'", [])
+                .map_err(error::Error::from)?;
             Ok(())
         });
- 
+
         assert!(result.is_err(), "should reject delete of builtin transform");
     }
- 
+
     /// Builtin transforms cannot be soft-deleted.
     #[test]
     fn builtin_transform_rejects_soft_delete() {
         let (_tmp, writer) = test_writer();
- 
+
         let result = writer.call_write(|conn| {
             conn.execute(
                 "UPDATE transforms SET deleted_at = '2025-01-01T00:00:00Z' WHERE name = 'flatten'",
                 [],
-            ).map_err(error::Error::from)?;
+            )
+            .map_err(error::Error::from)?;
             Ok(())
         });
- 
-        assert!(result.is_err(), "should reject soft-delete of builtin transform");
+
+        assert!(
+            result.is_err(),
+            "should reject soft-delete of builtin transform"
+        );
     }
- 
+
     /// Builtin recipes cannot be hard-deleted.
     #[test]
     fn builtin_recipe_rejects_delete() {
         let (_tmp, writer) = test_writer();
- 
+
         let result = writer.call_write(|conn| {
             conn.execute(
                 "DELETE FROM build_recipes WHERE name = 'shipped-default'",
                 [],
-            ).map_err(error::Error::from)?;
+            )
+            .map_err(error::Error::from)?;
             Ok(())
         });
- 
+
         assert!(result.is_err(), "should reject delete of builtin recipe");
     }
- 
+
     /// Custom rows are not affected by builtin protection triggers.
     #[test]
     fn custom_transform_allows_delete() {
         let (_tmp, writer) = test_writer();
- 
+
         writer.call_write(|conn| {
             conn.execute(
                 "INSERT INTO transforms (name, scope, curation) VALUES ('test-custom', 'file', 'custom')",
                 [],
             ).map_err(error::Error::from)?;
- 
+
             conn.execute(
                 "DELETE FROM transforms WHERE name = 'test-custom'",
                 [],
             ).map_err(error::Error::from)?;
- 
+
             Ok(())
         }).expect("custom transform delete should succeed");
     }

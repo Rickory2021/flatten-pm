@@ -344,12 +344,10 @@ fn cmd_db_init(cli: &Cli) -> Result<(), String> {
             .map_err(|e| format!("failed to create data directory: {e}"))?;
     }
 
-    let _writer =
-        db::writer::Writer::open(&path).map_err(|e| format!("{e}"))?;
+    let _writer = db::writer::Writer::open(&path).map_err(|e| format!("{e}"))?;
 
     // Read back user_version to confirm
-    let conn =
-        db::open_reader(&path).map_err(|e| format!("{e}"))?;
+    let conn = db::open_reader(&path).map_err(|e| format!("{e}"))?;
     let version: i32 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|e| format!("{e}"))?;
@@ -360,8 +358,7 @@ fn cmd_db_init(cli: &Cli) -> Result<(), String> {
 
 fn cmd_db_tables(cli: &Cli) -> Result<(), String> {
     let path = resolve_db_path(cli);
-    let conn =
-        db::open_reader(&path).map_err(|e| format!("{e}"))?;
+    let conn = db::open_reader(&path).map_err(|e| format!("{e}"))?;
 
     let mut stmt = conn
         .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
@@ -383,16 +380,11 @@ fn cmd_db_tables(cli: &Cli) -> Result<(), String> {
 
 fn cmd_db_query(cli: &Cli, sql: &str) -> Result<(), String> {
     let path = resolve_db_path(cli);
-    let conn =
-        db::open_reader(&path).map_err(|e| format!("{e}"))?;
+    let conn = db::open_reader(&path).map_err(|e| format!("{e}"))?;
 
     let mut stmt = conn.prepare(sql).map_err(|e| format!("{e}"))?;
 
-    let columns: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
 
     let rows: Vec<Vec<String>> = stmt
         .query_map([], |row| {
@@ -426,14 +418,12 @@ fn cmd_db_query(cli: &Cli, sql: &str) -> Result<(), String> {
 
 fn cmd_settings_get(cli: &Cli, key: &str) -> Result<(), String> {
     let path = resolve_db_path(cli);
-    let conn =
-        db::open_reader(&path).map_err(|e| format!("{e}"))?;
+    let conn = db::open_reader(&path).map_err(|e| format!("{e}"))?;
 
-    let result: Result<String, _> = conn.query_row(
-        "SELECT value FROM settings WHERE key = ?1",
-        [key],
-        |row| row.get(0),
-    );
+    let result: Result<String, _> =
+        conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+            row.get(0)
+        });
 
     match result {
         Ok(v) => {
@@ -447,8 +437,7 @@ fn cmd_settings_get(cli: &Cli, key: &str) -> Result<(), String> {
 
 fn cmd_settings_set(cli: &Cli, key: &str, value: &str) -> Result<(), String> {
     let path = resolve_db_path(cli);
-    let writer =
-        db::writer::Writer::open(&path).map_err(|e| format!("{e}"))?;
+    let writer = db::writer::Writer::open(&path).map_err(|e| format!("{e}"))?;
 
     let key_owned = key.to_string();
     let value_owned = value.to_string();
@@ -667,9 +656,7 @@ fn main() -> ExitCode {
             DbCommand::Query { sql } => cmd_db_query(&cli, sql).map_err(CliError::from),
         },
         CliCommand::Settings(args) => match &args.command {
-            SettingsCommand::Get { key } => {
-                cmd_settings_get(&cli, key).map_err(CliError::from)
-            }
+            SettingsCommand::Get { key } => cmd_settings_get(&cli, key).map_err(CliError::from),
             SettingsCommand::Set { key, value } => {
                 cmd_settings_set(&cli, key, value).map_err(CliError::from)
             }

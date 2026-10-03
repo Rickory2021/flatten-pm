@@ -9,7 +9,7 @@
 // CURRENT_FORMAT_VERSION.
 
 use super::error::{Error, Result};
-use super::{NodeIndex, NodeKind, Trie, ROOT};
+use super::{NodeIndex, NodeKind, ROOT, Trie};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -148,11 +148,7 @@ pub(crate) fn load(path: &Path) -> Result<Trie> {
     if header[..4] != MAGIC {
         return Err(Error::Corrupt {
             path: path_str,
-            reason: format!(
-                "bad magic: expected {:?}, got {:?}",
-                MAGIC,
-                &header[..4]
-            ),
+            reason: format!("bad magic: expected {:?}, got {:?}", MAGIC, &header[..4]),
         });
     }
 
@@ -173,11 +169,10 @@ pub(crate) fn load(path: &Path) -> Result<Trie> {
     })?;
 
     // Deserialize
-    let payload: TriePayload =
-        rmp_serde::from_slice(&body).map_err(|e| Error::Corrupt {
-            path: path_str.clone(),
-            reason: format!("deserialization failed: {e}"),
-        })?;
+    let payload: TriePayload = rmp_serde::from_slice(&body).map_err(|e| Error::Corrupt {
+        path: path_str.clone(),
+        reason: format!("deserialization failed: {e}"),
+    })?;
 
     // Structural validation
     validate(&payload.arena, payload.free_head, &path_str)?;
@@ -299,9 +294,7 @@ fn validate_subtree(
                     if window[0].0 >= window[1].0 {
                         return Err(Error::Corrupt {
                             path: path.into(),
-                            reason: format!(
-                                "unsorted or duplicate children in Dir at index {i}"
-                            ),
+                            reason: format!("unsorted or duplicate children in Dir at index {i}"),
                         });
                     }
                 }
@@ -336,7 +329,7 @@ fn validate_subtree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trie::{empty_merkle_hash, LeafNode};
+    use crate::trie::{LeafNode, empty_merkle_hash};
 
     fn leaf(hash: [u8; 32]) -> LeafNode {
         LeafNode {
@@ -513,10 +506,7 @@ mod tests {
         {
             let arena = vec![
                 NodeKind::Dir {
-                    children: vec![
-                        ("a".into(), NodeIndex(1)),
-                        ("b".into(), NodeIndex(2)),
-                    ],
+                    children: vec![("a".into(), NodeIndex(1)), ("b".into(), NodeIndex(2))],
                     merkle_hash: [0u8; 32],
                 },
                 NodeKind::Dir {

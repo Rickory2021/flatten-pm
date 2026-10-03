@@ -13,9 +13,9 @@ mod test_util;
 
 use std::path::{Path, PathBuf};
 
-use error::{Error, Result};
 use crate::db;
 use crate::trie;
+use error::{Error, Result};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -110,7 +110,16 @@ fn update_trie_timestamp(writer: &db::writer::Writer, repo_id: i64) -> Result<()
 /// Raw column tuple from the repos table. The JSON parse happens outside
 /// the rusqlite callback to preserve the `Error::Json` variant on corrupt
 /// `ingest_patterns`.
-type RawRepoRow = (i64, String, String, String, String, Option<String>, String, Option<String>);
+type RawRepoRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+);
 
 /// Extract a `RawRepoRow` from a rusqlite `Row`.
 /// Used inside `query_row`/`query_map` callbacks.
@@ -492,17 +501,14 @@ pub fn edit_repo(
             .optional()
             .map_err(db::error::Error::from)
         })?;
-        let path_str =
-            maybe_path.ok_or_else(|| Error::RepoNotFound(format!("id {repo_id}")))?;
+        let path_str = maybe_path.ok_or_else(|| Error::RepoNotFound(format!("id {repo_id}")))?;
         let root = PathBuf::from(&path_str);
         patterns::build_matcher(&root, pats)?;
     }
 
     // UPDATE with COALESCE
     let new_name_owned = new_name.map(|s| s.to_string());
-    let new_patterns_json = new_patterns
-        .map(serde_json::to_string)
-        .transpose()?;
+    let new_patterns_json = new_patterns.map(serde_json::to_string).transpose()?;
     let new_policy_owned = new_line_ending_policy.map(|s| s.to_string());
     let name_for_err = new_name.unwrap_or("").to_string();
 
@@ -525,9 +531,7 @@ pub fn edit_repo(
             if let db::error::Error::RuSQLite(rusqlite::Error::SqliteFailure(ref err, _)) = e
                 && err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
             {
-                return Error::DuplicateName {
-                    name: name_for_err,
-                };
+                return Error::DuplicateName { name: name_for_err };
             }
             Error::Database(e)
         })?;
@@ -721,7 +725,8 @@ mod tests {
         let trie_path = data_dir.path().join("tries").join(format!("{id}.trie"));
         assert!(
             trie_path.exists(),
-            "trie file should exist at {}", trie_path.display()
+            "trie file should exist at {}",
+            trie_path.display()
         );
     }
 
@@ -931,15 +936,8 @@ mod tests {
         let (trie, report) =
             reingest(&writer, data_dir.path(), id).expect("reingest should succeed");
 
-        assert_eq!(
-            trie.list("").len(),
-            3,
-            "trie should have 3 leaves"
-        );
-        assert_eq!(
-            report.file_count, 3,
-            "report should match trie leaf count"
-        );
+        assert_eq!(trie.list("").len(), 3, "trie should have 3 leaves");
+        assert_eq!(report.file_count, 3, "report should match trie leaf count");
     }
 
     #[test]
@@ -1004,15 +1002,8 @@ mod tests {
         let (trie, report) =
             load_or_reingest(&writer, data_dir.path(), id).expect("recovery should succeed");
 
-        assert!(
-            report.is_some(),
-            "report should be Some (re-ingest ran)"
-        );
-        assert_eq!(
-            trie.list("").len(),
-            1,
-            "recovered trie should have 1 leaf"
-        );
+        assert!(report.is_some(), "report should be Some (re-ingest ran)");
+        assert_eq!(trie.list("").len(), 1, "recovered trie should have 1 leaf");
     }
 
     #[test]
@@ -1039,15 +1030,8 @@ mod tests {
         let (trie, report) =
             load_or_reingest(&writer, data_dir.path(), id).expect("recovery should succeed");
 
-        assert!(
-            report.is_some(),
-            "report should be Some (re-ingest ran)"
-        );
-        assert_eq!(
-            trie.list("").len(),
-            1,
-            "recovered trie should have 1 leaf"
-        );
+        assert!(report.is_some(), "report should be Some (re-ingest ran)");
+        assert_eq!(trie.list("").len(), 1, "recovered trie should have 1 leaf");
     }
 
     #[test]
@@ -1074,11 +1058,7 @@ mod tests {
             report.is_none(),
             "report should be None (loaded from file, no re-ingest)"
         );
-        assert_eq!(
-            trie.list("").len(),
-            1,
-            "loaded trie should have 1 leaf"
-        );
+        assert_eq!(trie.list("").len(), 1, "loaded trie should have 1 leaf");
     }
 
     // --- CRUD tests (42-52) ---
@@ -1159,10 +1139,7 @@ mod tests {
         // Happy path
         let row = get_repo_by_name(&conn, "get-test").expect("get should succeed");
         assert_eq!(row.name, "get-test", "name should match");
-        assert_eq!(
-            row.line_ending_policy, "preserve",
-            "policy should match"
-        );
+        assert_eq!(row.line_ending_policy, "preserve", "policy should match");
 
         // Error path
         let result = get_repo_by_name(&conn, "nonexistent");
@@ -1193,11 +1170,9 @@ mod tests {
 
         let conn = test_reader(data_dir.path());
         let deleted_at: Option<String> = conn
-            .query_row(
-                "SELECT deleted_at FROM repos WHERE id = ?1",
-                [id],
-                |row| row.get(0),
-            )
+            .query_row("SELECT deleted_at FROM repos WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
             .expect("row should exist");
 
         assert!(
@@ -1283,14 +1258,7 @@ mod tests {
         .expect("register b should succeed");
 
         // Try to rename a to b's name
-        let result = edit_repo(
-            &writer,
-            data_dir.path(),
-            id_a,
-            Some("repo-b"),
-            None,
-            None,
-        );
+        let result = edit_repo(&writer, data_dir.path(), id_a, Some("repo-b"), None, None);
 
         assert!(
             matches!(result, Err(Error::DuplicateName { .. })),
@@ -1301,10 +1269,7 @@ mod tests {
     #[test]
     fn edit_repo_updates_patterns_reingests() {
         let data_dir = tempfile::TempDir::new().unwrap();
-        let repo_dir = test_dir_with_files(&[
-            ("a.txt", "hello"),
-            ("b.log", "log entry"),
-        ]);
+        let repo_dir = test_dir_with_files(&[("a.txt", "hello"), ("b.log", "log entry")]);
         let writer = test_db(data_dir.path());
 
         let (id, report1) = register_repo(
@@ -1359,14 +1324,7 @@ mod tests {
         .expect("register should succeed");
 
         // Invalid line ending policy should fail without changing the row
-        let result = edit_repo(
-            &writer,
-            data_dir.path(),
-            id,
-            None,
-            None,
-            Some("crlf"),
-        );
+        let result = edit_repo(&writer, data_dir.path(), id, None, None, Some("crlf"));
 
         assert!(
             matches!(result, Err(Error::InvalidLineEndingPolicy { .. })),
@@ -1575,10 +1533,7 @@ mod tests {
 
     #[test]
     fn assemble_patterns_merge_order() {
-        let dir = test_dir_with_files(&[
-            (".gitignore", "from_git\n"),
-            ("a.txt", "hello"),
-        ]);
+        let dir = test_dir_with_files(&[(".gitignore", "from_git\n"), ("a.txt", "hello")]);
 
         let canonical = canonical_root(dir.path()).expect("canonical_root");
         let result = assemble_patterns(&canonical, &["explicit".to_string()], true)
@@ -1592,16 +1547,17 @@ mod tests {
 
     #[test]
     fn assemble_patterns_no_import() {
-        let dir = test_dir_with_files(&[
-            (".gitignore", "from_git\n"),
-            ("a.txt", "hello"),
-        ]);
+        let dir = test_dir_with_files(&[(".gitignore", "from_git\n"), ("a.txt", "hello")]);
 
         let canonical = canonical_root(dir.path()).expect("canonical_root");
         let result = assemble_patterns(&canonical, &["only_this".to_string()], false)
             .expect("assemble should succeed");
 
-        assert_eq!(result, vec!["only_this"], "import=false returns only explicit");
+        assert_eq!(
+            result,
+            vec!["only_this"],
+            "import=false returns only explicit"
+        );
     }
 
     #[test]
@@ -1635,7 +1591,8 @@ mod tests {
         let hex = report.root_hash_hex();
         assert_eq!(hex.len(), 64, "hex string should be 64 chars");
         assert!(
-            hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "hex string should be lowercase hex, got: {hex}"
         );
         assert_eq!(&hex[..4], "abab", "first two bytes should be 'abab'");

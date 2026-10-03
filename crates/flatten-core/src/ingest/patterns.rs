@@ -60,11 +60,7 @@ pub(crate) fn build_matcher(root: &Path, patterns: &[String]) -> Result<Gitignor
 ///
 /// Both `walk_and_hash` and `walk_paths_filtered` consume this. The shared
 /// implementation guarantees identical filtering behavior.
-fn for_each_included<F>(
-    root: &Path,
-    patterns: &[String],
-    mut f: F,
-) -> Result<usize>
+fn for_each_included<F>(root: &Path, patterns: &[String], mut f: F) -> Result<usize>
 where
     F: FnMut(&Path, String, std::fs::Metadata) -> Result<()>,
 {
@@ -341,7 +337,10 @@ pub fn import_gitignore(root: &Path) -> Result<Vec<String>> {
                 };
 
                 // Skip malformed lines
-                if GitignoreBuilder::new("").add_line(None, &candidate).is_err() {
+                if GitignoreBuilder::new("")
+                    .add_line(None, &candidate)
+                    .is_err()
+                {
                     continue;
                 }
                 patterns.push(candidate);
@@ -509,10 +508,7 @@ mod tests {
     fn walk_directory_cut_never_descends() {
         use crate::ingest::test_util::RestorePerms;
 
-        let dir = test_dir_with_files(&[
-            ("ok.txt", "visible"),
-            ("locked/secret.txt", "hidden"),
-        ]);
+        let dir = test_dir_with_files(&[("ok.txt", "visible"), ("locked/secret.txt", "hidden")]);
 
         let locked = dir.path().join("locked");
         let _guard = RestorePerms::set(&locked, 0o000);
@@ -544,8 +540,7 @@ mod tests {
 
         // Create a symlink: link.txt -> target.txt
         let link_path = dir.path().join("link.txt");
-        std::os::unix::fs::symlink("target.txt", &link_path)
-            .expect("failed to create symlink");
+        std::os::unix::fs::symlink("target.txt", &link_path).expect("failed to create symlink");
 
         let patterns: Vec<String> = vec![];
         let (leaves, _) = walk_and_hash(dir.path(), &patterns).expect("walk failed");
@@ -583,7 +578,10 @@ mod tests {
         let patterns: Vec<String> = vec![];
         let paths = walk_paths(dir.path(), &patterns);
 
-        assert!(paths.contains(&"a.txt".to_string()), "a.txt should be included");
+        assert!(
+            paths.contains(&"a.txt".to_string()),
+            "a.txt should be included"
+        );
         assert!(
             paths.contains(&".gitignore".to_string()),
             ".gitignore itself should be included"
@@ -648,10 +646,7 @@ mod tests {
     fn walk_walker_error_fails_ingest() {
         use crate::ingest::test_util::RestorePerms;
 
-        let dir = test_dir_with_files(&[
-            ("ok.txt", "visible"),
-            ("locked/secret.txt", "hidden"),
-        ]);
+        let dir = test_dir_with_files(&[("ok.txt", "visible"), ("locked/secret.txt", "hidden")]);
 
         let locked = dir.path().join("locked");
         let _guard = RestorePerms::set(&locked, 0o000);
@@ -663,10 +658,7 @@ mod tests {
         // No exclusion pattern: the walker WILL try to descend into locked/
         let result = walk_and_hash(dir.path(), &[]);
 
-        assert!(
-            result.is_err(),
-            "walk should fail on permission denied"
-        );
+        assert!(result.is_err(), "walk should fail on permission denied");
         let err = result.unwrap_err();
         assert!(
             matches!(err, Error::Io { .. }),
@@ -715,10 +707,7 @@ mod tests {
 
     #[test]
     fn walk_filtered_skips_git() {
-        let dir = test_dir_with_files(&[
-            ("a.txt", "hello"),
-            (".git/HEAD", "ref: refs/heads/main"),
-        ]);
+        let dir = test_dir_with_files(&[("a.txt", "hello"), (".git/HEAD", "ref: refs/heads/main")]);
         let paths = walk_paths_filtered(dir.path(), &[]).expect("walk should succeed");
 
         assert!(paths.contains(&"a.txt".to_string()), "a.txt included");
@@ -762,8 +751,8 @@ mod tests {
         let mut hash_paths: Vec<String> = leaves.into_iter().map(|(p, _)| p).collect();
         hash_paths.sort();
 
-        let mut filtered_paths = walk_paths_filtered(dir.path(), &patterns)
-            .expect("walk_paths_filtered");
+        let mut filtered_paths =
+            walk_paths_filtered(dir.path(), &patterns).expect("walk_paths_filtered");
         filtered_paths.sort();
 
         assert_eq!(
@@ -784,7 +773,10 @@ mod tests {
 
         assert!(paths.contains(&"a.txt".to_string()), "a.txt included");
         assert!(!paths.contains(&"b.log".to_string()), "b.log excluded");
-        assert!(!paths.contains(&"sub/c.log".to_string()), "sub/c.log excluded");
+        assert!(
+            !paths.contains(&"sub/c.log".to_string()),
+            "sub/c.log excluded"
+        );
     }
 
     // --- Import tests ---
@@ -842,7 +834,11 @@ mod tests {
         let dir = test_dir_with_files(&[(".gitignore", "# comment\n\n*.log\n  \n")]);
         let patterns = import_gitignore(dir.path()).expect("import failed");
 
-        assert_eq!(patterns, vec!["*.log"], "comments and blanks should be skipped");
+        assert_eq!(
+            patterns,
+            vec!["*.log"],
+            "comments and blanks should be skipped"
+        );
     }
 
     #[test]
@@ -862,10 +858,7 @@ mod tests {
         let dir = test_dir_with_files(&[("src/main.rs", "fn main() {}")]);
         let patterns = import_gitignore(dir.path()).expect("import failed");
 
-        assert!(
-            patterns.is_empty(),
-            "no .gitignore should return empty vec"
-        );
+        assert!(patterns.is_empty(), "no .gitignore should return empty vec");
     }
 
     #[test]

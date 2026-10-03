@@ -97,11 +97,8 @@ pub async fn repo_tree(
 ) -> Result<Vec<String>, CommandError> {
     let conn = flatten_core::db::open_reader(&state.db_path)?;
     let _repo = flatten_core::ingest::get_repo(&conn, repo_id)?;
-    let (trie, _) = flatten_core::ingest::load_or_reingest(
-        &state.writer,
-        &state.data_dir,
-        repo_id,
-    )?;
+    let (trie, _) =
+        flatten_core::ingest::load_or_reingest(&state.writer, &state.data_dir, repo_id)?;
     Ok(trie.list(""))
 }
 
@@ -134,11 +131,7 @@ pub async fn repo_reingest(
     repo_id: i64,
     state: tauri::State<'_, AppState>,
 ) -> Result<IngestReportDto, CommandError> {
-    let (_, report) = flatten_core::ingest::reingest(
-        &state.writer,
-        &state.data_dir,
-        repo_id,
-    )?;
+    let (_, report) = flatten_core::ingest::reingest(&state.writer, &state.data_dir, repo_id)?;
     Ok(IngestReportDto::from(report))
 }
 
@@ -166,13 +159,9 @@ pub async fn repo_excluded_files(
     let root = PathBuf::from(&repo.path);
     let all_paths = flatten_core::ingest::walk_paths_filtered(&root, &[])?;
 
-    let (trie, _) = flatten_core::ingest::load_or_reingest(
-        &state.writer,
-        &state.data_dir,
-        repo_id,
-    )?;
-    let trie_paths: std::collections::HashSet<String> =
-        trie.list("").into_iter().collect();
+    let (trie, _) =
+        flatten_core::ingest::load_or_reingest(&state.writer, &state.data_dir, repo_id)?;
+    let trie_paths: std::collections::HashSet<String> = trie.list("").into_iter().collect();
 
     Ok(all_paths
         .into_iter()
@@ -191,12 +180,12 @@ pub async fn repo_preview(
 ) -> Result<Vec<String>, CommandError> {
     let root = PathBuf::from(&path);
     let canonical = flatten_core::ingest::canonical_root(&root)?;
-    let final_patterns = flatten_core::ingest::assemble_patterns(
+    let final_patterns =
+        flatten_core::ingest::assemble_patterns(&canonical, &patterns, import_gitignore)?;
+    Ok(flatten_core::ingest::walk_paths_filtered(
         &canonical,
-        &patterns,
-        import_gitignore,
-    )?;
-    Ok(flatten_core::ingest::walk_paths_filtered(&canonical, &final_patterns)?)
+        &final_patterns,
+    )?)
 }
 
 /// Read a file from a repo for preview. Validates path safety, size, and
@@ -228,38 +217,34 @@ fn read_repo_file(
     // 2. Parent directory containment check: canonicalize the parent and
     // verify it is under the repo root. This catches intermediate symlinks
     // that escape the repo before we touch the target file at all.
-    let parent = full_path.parent().ok_or_else(|| {
-        CommandError::domain("invalid path: no parent".to_string())
+    let parent = full_path
+        .parent()
+        .ok_or_else(|| CommandError::domain("invalid path: no parent".to_string()))?;
+    let parent_canonical = std::fs::canonicalize(parent).map_err(|e| CommandError {
+        error: format!("file not found: {e}"),
+        kind: "io",
     })?;
-    let parent_canonical = std::fs::canonicalize(parent)
-        .map_err(|e| CommandError {
-            error: format!("file not found: {e}"),
-            kind: "io",
-        })?;
-    let repo_canonical = std::fs::canonicalize(repo_root)
-        .map_err(|e| CommandError {
-            error: format!("repo path invalid: {e}"),
-            kind: "io",
-        })?;
+    let repo_canonical = std::fs::canonicalize(repo_root).map_err(|e| CommandError {
+        error: format!("repo path invalid: {e}"),
+        kind: "io",
+    })?;
     if !parent_canonical.starts_with(&repo_canonical) {
         return Err(CommandError::domain("path traversal denied".to_string()));
     }
 
     // 3. Type check
-    let link_meta = std::fs::symlink_metadata(&full_path)
-        .map_err(|e| CommandError {
-            error: format!("file not found: {e}"),
-            kind: "io",
-        })?;
+    let link_meta = std::fs::symlink_metadata(&full_path).map_err(|e| CommandError {
+        error: format!("file not found: {e}"),
+        kind: "io",
+    })?;
 
     // 4. Symlink: return the link target string (what ingest hashed).
     // Parent containment already verified above, so this is safe.
     if link_meta.file_type().is_symlink() {
-        let target = std::fs::read_link(&full_path)
-            .map_err(|e| CommandError {
-                error: format!("cannot read symlink: {e}"),
-                kind: "io",
-            })?;
+        let target = std::fs::read_link(&full_path).map_err(|e| CommandError {
+            error: format!("cannot read symlink: {e}"),
+            kind: "io",
+        })?;
         return Ok(FilePreviewDto {
             kind: "symlink",
             content: target.to_string_lossy().into_owned(),
@@ -267,21 +252,19 @@ fn read_repo_file(
     }
 
     // 5. Regular file: belt-and-braces canonicalize + containment
-    let canonical = std::fs::canonicalize(&full_path)
-        .map_err(|e| CommandError {
-            error: format!("file not found: {e}"),
-            kind: "io",
-        })?;
+    let canonical = std::fs::canonicalize(&full_path).map_err(|e| CommandError {
+        error: format!("file not found: {e}"),
+        kind: "io",
+    })?;
     if !canonical.starts_with(&repo_canonical) {
         return Err(CommandError::domain("path traversal denied".to_string()));
     }
 
     // 6. Size guard: reject files over 1MB
-    let metadata = std::fs::metadata(&canonical)
-        .map_err(|e| CommandError {
-            error: format!("cannot stat file: {e}"),
-            kind: "io",
-        })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|e| CommandError {
+        error: format!("cannot stat file: {e}"),
+        kind: "io",
+    })?;
     if metadata.len() > 1_048_576 {
         return Err(CommandError::domain(format!(
             "file too large for preview ({} bytes, max 1MB)",
@@ -290,11 +273,10 @@ fn read_repo_file(
     }
 
     // 7. Binary check: null byte in first 8KB
-    let content = std::fs::read(&canonical)
-        .map_err(|e| CommandError {
-            error: format!("cannot read file: {e}"),
-            kind: "io",
-        })?;
+    let content = std::fs::read(&canonical).map_err(|e| CommandError {
+        error: format!("cannot read file: {e}"),
+        kind: "io",
+    })?;
     if content.iter().take(8192).any(|&b| b == 0) {
         return Err(CommandError::domain(
             "binary file; preview not available".to_string(),
@@ -327,9 +309,7 @@ pub async fn repo_read_file(
 /// so it works in the wizard (before registration) and in the detail view.
 /// Calls `canonical_root` first for consistent error kinds.
 #[tauri::command]
-pub async fn repo_gitignore_patterns(
-    path: String,
-) -> Result<Vec<String>, CommandError> {
+pub async fn repo_gitignore_patterns(path: String) -> Result<Vec<String>, CommandError> {
     let root = PathBuf::from(&path);
     let canonical = flatten_core::ingest::canonical_root(&root)?;
     Ok(flatten_core::ingest::import_gitignore(&canonical)?)
@@ -367,9 +347,7 @@ mod tests {
             IE::NonExistentPath {
                 path: "/tmp".into(),
             },
-            IE::DuplicateName {
-                name: "dup".into(),
-            },
+            IE::DuplicateName { name: "dup".into() },
             IE::RepoNotFound("id 1".into()),
             IE::InvalidLineEndingPolicy {
                 value: "crlf".into(),
@@ -403,23 +381,17 @@ mod tests {
         use flatten_core::ingest::error::Error as IE;
 
         // Json variant
-        let json_err = IE::Json(
-            serde_json::from_str::<String>("not json").unwrap_err(),
-        );
+        let json_err = IE::Json(serde_json::from_str::<String>("not json").unwrap_err());
         let cmd_err = CommandError::from(json_err);
         assert_eq!(cmd_err.kind, "database", "Json should map to database");
 
         // Trie variant
-        let trie_err = IE::Trie(
-            flatten_core::trie::error::Error::InvalidPath("test".into()),
-        );
+        let trie_err = IE::Trie(flatten_core::trie::error::Error::InvalidPath("test".into()));
         let cmd_err2 = CommandError::from(trie_err);
         assert_eq!(cmd_err2.kind, "database", "Trie should map to database");
 
         // Database variant
-        let db_err = IE::Database(
-            flatten_core::db::error::Error::Writer("test".into()),
-        );
+        let db_err = IE::Database(flatten_core::db::error::Error::Writer("test".into()));
         let cmd_err3 = CommandError::from(db_err);
         assert_eq!(cmd_err3.kind, "database", "Database should map to database");
     }
@@ -436,7 +408,11 @@ mod tests {
         };
         let dto = IngestReportDto::from(report);
         assert_eq!(dto.root_hash.len(), 64, "hex should be 64 chars");
-        assert_eq!(&dto.root_hash[..4], "abab", "first two bytes 0xab -> 'abab'");
+        assert_eq!(
+            &dto.root_hash[..4],
+            "abab",
+            "first two bytes 0xab -> 'abab'"
+        );
         assert_eq!(dto.file_count, 5, "file_count preserved");
     }
 
@@ -545,7 +521,10 @@ mod tests {
         // "linkdir/secret.txt" is a valid trie path, but linkdir resolves
         // outside the repo. The parent containment check should catch it.
         let result = read_repo_file(repo.path(), "linkdir/secret.txt");
-        assert!(result.is_err(), "symlinked parent escape should be rejected");
+        assert!(
+            result.is_err(),
+            "symlinked parent escape should be rejected"
+        );
         let err = result.unwrap_err();
         assert_eq!(err.kind, "domain", "should be domain error");
         assert!(

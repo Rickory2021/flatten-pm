@@ -26,13 +26,10 @@ pub struct QueryResult {
 ///
 /// Uses a per-call reader connection (per ADR-038, no connection pool).
 #[tauri::command]
-pub async fn db_tables(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<String>, CommandError> {
+pub async fn db_tables(state: tauri::State<'_, AppState>) -> Result<Vec<String>, CommandError> {
     let conn = flatten_core::db::open_reader(&state.db_path)?;
-    let mut stmt = conn.prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     let tables: Vec<String> = rows.collect::<std::result::Result<_, _>>()?;
     Ok(tables)
@@ -57,10 +54,7 @@ pub async fn db_query(
 ///
 /// Separated from `db_query` so unit tests can call it with an in-memory
 /// connection without needing Tauri state or a database file.
-fn execute_query(
-    conn: &rusqlite::Connection,
-    sql: &str,
-) -> Result<QueryResult, CommandError> {
+fn execute_query(conn: &rusqlite::Connection, sql: &str) -> Result<QueryResult, CommandError> {
     let mut stmt = conn.prepare(sql)?;
 
     // sqlite3_stmt_readonly: rejects INSERT, UPDATE, DELETE, DROP, ALTER,
@@ -84,11 +78,7 @@ fn execute_query(
         return Err(CommandError::domain("write statements are not allowed"));
     }
 
-    let columns: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
 
     let col_count = columns.len();
     let mut result_rows = Vec::new();
@@ -160,7 +150,11 @@ mod tests {
             "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < 2000) SELECT x FROM n",
         );
         let qr = result.expect("recursive CTE should succeed");
-        assert_eq!(qr.rows.len(), QUERY_ROW_LIMIT, "should cap at QUERY_ROW_LIMIT");
+        assert_eq!(
+            qr.rows.len(),
+            QUERY_ROW_LIMIT,
+            "should cap at QUERY_ROW_LIMIT"
+        );
         assert!(qr.truncated, "truncated flag should be true");
         assert_eq!(qr.columns, vec!["x"], "column name should be x");
     }
@@ -173,8 +167,16 @@ mod tests {
         let qr = result.expect("simple SELECT should succeed");
         assert_eq!(qr.columns, vec!["a", "b"], "columns should match");
         assert_eq!(qr.rows.len(), 1, "should have one row");
-        assert_eq!(qr.rows[0][0], serde_json::json!(1), "first column should be 1");
-        assert_eq!(qr.rows[0][1], serde_json::json!("hello"), "second column should be 'hello'");
+        assert_eq!(
+            qr.rows[0][0],
+            serde_json::json!(1),
+            "first column should be 1"
+        );
+        assert_eq!(
+            qr.rows[0][1],
+            serde_json::json!("hello"),
+            "second column should be 'hello'"
+        );
         assert!(!qr.truncated, "truncated should be false");
     }
 }
