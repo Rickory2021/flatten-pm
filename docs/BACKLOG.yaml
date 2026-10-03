@@ -107,6 +107,10 @@
 #     Implementation finding discovered during build or audit.
 #     Not a blocker; recorded for future stories or reconciliation.
 #
+#   # [SUPERSEDED: STORY-ID] short description
+#     Behavior replaced by a later story's design; that story owns the
+#     new behavior. The original AC text stays for traceability.
+#
 # Inline on AC / verification lines (the detail the index points to):
 #
 #   [DEFERRED: X] or [DEFERRED: X, extra notes]
@@ -117,6 +121,9 @@
 #
 #   [resolved by X; remaining notes]
 #     Partially resolved; notes say what's left.
+#
+#   [SUPERSEDED: X] or [SUPERSEDED: X, extra notes]
+#     This AC was replaced by story X; X's ACs define current behavior.
 #
 # Grep: `grep "DEFERRED:" docs/BACKLOG.yaml` lists every open item
 # across all stories.
@@ -405,7 +412,7 @@ stories:
         have it parsed into an executable structure, and persist it as a versioned
         row, so that recipes are portable files and stored history at once.
       stage: s1
-      status: in-progress
+      status: backlog
       acceptance_criteria:
         - "Grammar documented in docs/RECIPE.md: line-oriented, # comments, backslash continuation, double-quoted args with escapes, ${NAME} substitution, significant indentation for nesting, blocks opened by trailing :"
         - "Recipe-level instructions (execute in file order): ARG name[=default], COPY_DEFAULT_WITH [transforms], SOURCE <repo>:, RUN <transform> [--only <glob>...], INVOKE <recipe>[@N] [name=value ...], WATCH:"
@@ -913,7 +920,7 @@ stories:
         unit tests) and 4 (CLI coverage) do not apply; 14 tests are in
         src-tauri, not flatten-core. Zoom hotkeys enabled for WSLg/high-DPI;
         CSS zoom rasterizes (blurry at 150%+); a rem-based font-size setting
-        would stay crisp (deferred). Findings F-54 to F-59 filed on WA-006,
+        would stay crisp (deferred to APP-011). Findings F-54 to F-59 filed on WA-006,
         EX-001, CLI-001, PLAT-001.
 
     APP-001:
@@ -959,12 +966,14 @@ stories:
       # [FINDING] rename not exposed in v1; edit_repo accepts empty names, needs core guard
       # [FINDING] server-side empty name validation missing; wizard validates client-side only
       # [FINDING] CI does not run src-tauri tests or cargo clippy --workspace (needs webkit2gtk on runners)
+      # [FINDING] repo commands run synchronous walk/hash work inside async fn; repo_add and repo_reingest should move it to spawn_blocking
+      # [SUPERSEDED: APP-003B] multi-step wizard with pattern entry and preview; flat list and graph tree views; unfiltered excluded walk
       acceptance_criteria:
-        - "Registration wizard (in-page, not modal): directory picker, name (defaults to dir name), gitignore import toggle, manual pattern entry, preview, confirm"
-        - "Three repo detail views: accordion tree (VS Code-style collapsible hierarchy with folder counts), flat list (sorted trie paths with search), graph tree (node-and-edge SVG diagram with pan/zoom)"
-        - "Configure ingest rules: add/remove glob patterns with contextual actions from accordion/graph (exclude file, extension, folder, custom glob)"
+        - "Registration wizard (in-page, not modal): directory picker, name (defaults to dir name), gitignore import toggle, manual pattern entry, preview, confirm [SUPERSEDED: APP-003B, single-screen form; patterns edited on the detail page only]"
+        - "Three repo detail views: accordion tree (VS Code-style collapsible hierarchy with folder counts), flat list (sorted trie paths with search), graph tree (node-and-edge SVG diagram with pan/zoom) [SUPERSEDED: APP-003B, flat list and graph tree removed; APP-003C adds the icicle]"
+        - "Configure ingest rules: add/remove glob patterns with contextual actions from accordion/graph (exclude file, extension, folder, custom glob) [SUPERSEDED: APP-003B, graph actions removed with the view; edits become a draft with Save and Discard]"
         - "Gitignore re-import: call import_gitignore, diff against stored patterns, add selected (merge, never delete user patterns)"
-        - "Excluded file detection: unfiltered directory walk via walk_paths_filtered(&root, &[]); show excluded files grayed out in accordion and graph views on demand"
+        - "Excluded file detection: unfiltered directory walk via walk_paths_filtered(&root, &[]); show excluded files grayed out in accordion and graph views on demand [SUPERSEDED: APP-003B, lazy per-directory cuts replace the unfiltered walk]"
         - "File preview: read file from disk by repo path + trie path; size guard (1MB), binary check, path traversal protection, symlink target display; read-only"
         - "Each save triggers re-ingest"
         - "Each save writes repo_versions via DA-004 [DEFERRED: DA-004]"
@@ -984,19 +993,117 @@ stories:
 
     APP-003B:
       story: >
-        As a developer, the Repos page feels polished and intuitive,
-        so that registration, pattern editing, and file browsing are
-        efficient day-to-day workflows.
-      stage: s1
+        As a developer, I register a repo from one screen and tune its ingest
+        rules on the detail page, where the tree shows what is included, what
+        is cut, and by which pattern, so that ingest configuration is fast and
+        never ambiguous.
+      stage: s2
       status: backlog
       acceptance_criteria:
-        - "TBD: populate after UX review session"
+        - "Registration form (single screen, no steps): directory as a read-only path with a Browse button; display name (defaults to the directory name); Import .gitignore toggle (default on) showing the pattern count, or 'No .gitignore found'; Register button; no pattern entry at registration"
+        - "Repo detail layout: left side holds the view (accordion tab; APP-003C adds the icicle tab); right side is the selection panel"
+        - "Selection panel, file selected: content preview (APP-003 guards unchanged) and the patterns that cut entries in its parent directory; 'Included, no pattern applies' when none do"
+        - "Selection panel, directory selected: the patterns that cut its direct children (derived from cuts, not stored per directory) and its files, included and cut"
+        - "Tree order: folders first, then name, case-insensitive; implemented once in the shared tree builder (src/lib/tree.ts)"
+        - "Accordion search: filter mode; hides non-matches, auto-expands ancestors of matches, highlights the match; matches the file name by default and the full path when the query contains /"
+        - "Show excluded: cuts render crossed out at the depth where the cut happens, with nothing below them; folder badges read 'N cuts'; search results include cut matches labeled with the cutting pattern"
+        - "Search never reports contents of a cut directory (never walked); a path query that passes through a cut reports 'under <cut>, cut by <pattern>'"
+        - "Lazy cuts: a flatten-core function reads one directory level and checks each entry against a given pattern list, returning each cut entry with the pattern that cut it; called only for included directories; results cached per directory in the frontend; replaces the unfiltered walk in repo_excluded_files"
+        - "Parity: per-directory cuts combined across the whole tree equal the ingest walk's result for the same patterns"
+        - "Draft pattern editing: edits apply as a draft; expanded directories re-fetch cuts with the draft list after a 300ms debounce; Save commits and triggers re-ingest; Discard reverts"
+        - "flatten repo cuts <name> [<dir>] [--json] calls the lazy cuts function with the stored patterns; <dir> defaults to the repo root"
+        - "Flat list view (FlatList.tsx) and graph tree view (GraphTree.tsx) removed"
+        - "Stray short horizontal line at the top right of the Repos page removed"
+      verification:
+        - "flatten repo add fixtures/repo-a --name repo-a with .gitignore import; flatten repo cuts repo-a --json lists node_modules/ (cut by node_modules/) and debug.log (cut by *.log)"
+        - "cargo test -p flatten-core covers the lazy cuts function (directory cut, file cut inside an included directory, negation, empty pattern list) and the parity test against the ingest walk"
+        - "Tauri dev: register fixtures/repo-a from one screen; on the detail page folders sort before files; search 'lib' filters to src/lib.rs with src/ expanded; Show excluded shows node_modules/ crossed out at root with nothing below; selecting src/ lists its files and cutting patterns in the panel"
+        - "Tauri dev: add '*.rs' as a draft; src/*.rs rows turn crossed out before saving; Discard restores them; Save re-ingests"
       notes: >
-        Placeholder for UX polish on the APP-003 Repos page.
-        Covers spacing, layout, responsiveness, empty states,
-        loading feedback, wizard flow, tree views, file preview,
-        graph tree usability, and pattern editor ergonomics.
-        Fill ACs after a hands-on review.
+        Rescoped from the UX-polish placeholder after the Oct 2026 review
+        session. Supersedes three APP-003 ACs (wizard pattern entry and
+        preview, flat and graph views, unfiltered excluded walk). Wizard
+        pattern entry is dropped because 2_INGEST.md already limits
+        registration to a one-time .gitignore import (ADR-029); the stored
+        list is edited on the detail page. The graph view is removed here
+        rather than adapted, because it depends on repo_excluded_files and
+        APP-003C replaces it with the icicle. A cut is the first excluded
+        path on a branch; nothing below it is walked (gitignore semantics: a
+        file under an excluded directory cannot be re-included). The lazy
+        cuts function is valid only because its directory is always
+        included, which is why the parity test is required. Whether
+        repo_preview and repo_excluded_files are removed is settled in the
+        tech spec. The core function and CLI subcommand are built by the
+        backend thread; DoD criteria 3 and 4 apply. IN-001 finding
+        (soft-deleted repo names permanently unusable) gains priority: a
+        one-screen form makes registering the wrong directory easier.
+
+    APP-003C:
+      story: >
+        As a developer, I can analyze a repo as a zoomable icicle sized by bytes
+        or file count, comparing my stored ingest patterns against the repo's
+        own .gitignore files, so that I see what ingest keeps, what it cuts,
+        and where my config has drifted from the repo.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "Icicle tab on the repo detail page: d3-hierarchy partition layout rendered as app-owned SVG; label text sized in rem so it follows APP-011 text presets"
+        - "Locked three-level window: click a segment to zoom into it; click the parent column to zoom out; breadcrumbs show the focus path; selection feeds the APP-003B selection panel"
+        - "Analyze action: one batched command run off the async workers via spawn_blocking; 'Respect .gitignore' toggle, default on; result held at the repo detail level so it survives view switches; Analyze disabled while a scan runs; no streaming, no cancel"
+        - "Walk rules: the scan uses the ingest walker configuration (symlinks not followed and counted as single entries; FIFOs, sockets, and devices skipped)"
+        - "Live .gitignore: reads the repo's .gitignore files (root and nested) through the same core function as registration import and GitignoreDiff; global excludes and .git/info/exclude are not read (ADR-045)"
+        - "Classification per path from two rule sets (stored patterns, live .gitignore) plus trie presence: neither (included), ingest only, repo only (ingested though gitignored), both"
+        - "Respect .gitignore on: directories cut by both are not walked and render as fixed-width hatched 'not measured' segments; off: they are walked; ingest-only cuts are always walked"
+        - "Skip rule: a directory is skipped only when gitignored and absent from the trie"
+        - "Scan budget: a subtree stops after a time or file limit and its node is labeled 'at least N'"
+        - "Unreadable directory: its node is marked incomplete and the scan continues"
+        - "Hard links not deduplicated; sizes are apparent file size, labeled 'size', not disk usage"
+        - "Metric toggle: bytes (default) or file count; recalculated in the frontend without a rescan"
+        - "Freshness: a path on disk that matches no stored pattern and is absent from the trie, or a trie path missing from disk, shows 'needs re-ingest'; the result shows when it was measured and is discarded on pattern save or re-ingest"
+        - "flatten repo analyze <name> [--no-gitignore] [--json] calls the same core function"
+      verification:
+        - "flatten repo add fixtures/repo-a --name repo-a-raw without .gitignore import; flatten repo analyze repo-a-raw --json classifies node_modules/ and debug.log as repo only"
+        - "flatten repo add fixtures/repo-a --name repo-a-icicle with .gitignore import and --pattern 'README.md'; flatten repo analyze repo-a-icicle --json classifies node_modules/ and debug.log as both (node_modules/ not measured) and README.md as ingest only; with --no-gitignore, node_modules/ reports 1000 files"
+        - "cargo test -p flatten-core covers all four classification states, the skip rule (a gitignored directory present in the trie is walked), a symlink loop that does not hang, an unreadable directory reported incomplete (cfg(unix)), and the scan budget"
+        - "Tauri dev: open the icicle on repo-a-icicle and Analyze; three levels visible; click src/ to zoom in; switch to the accordion and back, the result is still shown; toggle bytes and count without a rescan"
+      notes: >
+        Builds on APP-003B (selection panel, cut model). Replaces the APP-003
+        graph tree view, which APP-003B removes. The icicle compares against
+        ingest (stored patterns and trie), never export. Reading the
+        filesystem and .gitignore live is display-only and never feeds ingest
+        (ADR-045); ADR-029 stands unchanged for ingest. Everything measured is
+        drawn to scale; hatched segments were not measured. Respect .gitignore
+        leaves the largest directories (target/, node_modules/) unmeasured,
+        which keeps the scan short and stops them dwarfing included content.
+        The repo-only state is the path-level counterpart of the GitignoreDiff
+        pattern-level diff; both read .gitignore through one function.
+        Progress streaming and cancel are deferred until a scan proves slow.
+        Repos under /mnt/c on WSL walk far slower than on ext4. The core
+        function and CLI subcommand are built by the backend thread; DoD
+        criteria 3 and 4 apply.
+
+    APP-011:
+      story: >
+        As a developer, I can pick a text size preset that scales the whole UI
+        crisply, so that the app reads well on any display without rasterized
+        zoom.
+      stage: s2
+      status: backlog
+      acceptance_criteria:
+        - "TBD: settle the decisions in notes, then populate"
+      notes: >
+        Picks up the APP-008 deferral (CSS zoom rasterizes at 150%+; a
+        rem-based font-size setting stays crisp). Open decisions: (1)
+        mechanism: root font-size presets (e.g. 14/16/18/20px) set by a data
+        attribute on <html>, recommended over CSS zoom or webview zoom; (2)
+        persistence: localStorage like the theme toggle, recommended over the
+        settings table (the CLI never reads it); (3) hotkeys: remap Ctrl+= and
+        Ctrl+- to step through presets and disable zoomHotkeysEnabled, which
+        reverses the APP-008 decision; (4) bundled sans and mono font faces
+        (woff2, offline) so rendering matches across OSes. Hardcoded px to
+        convert: sidebar width (amends the APP-000 fixed 220px AC), accordion
+        indent, form minimum height. Before building, set html font-size in
+        devtools under WSLg to confirm presets render crisp there.
 
     APP-004:
       story: >
