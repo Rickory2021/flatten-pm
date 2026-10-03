@@ -274,8 +274,14 @@ algorithm. No `kind` column is stored; the recorded `src_prefix` and
 
 | Matching type | Determination | How it matches dest_path |
 |---|---|---|
-| Prefix match | `src_prefix` is empty (from `.`) or either prefix ends with `/` | Anchored, segment-aligned. `dest/` matches `dest/x` but not `dest2/x`. Empty prefix (`COPY . .`) matches everything. Yields `(repo, src_prefix + remainder)`. |
+| Prefix match | Either prefix is empty (from `.`) or either ends with `/` | Anchored, segment-aligned. `dest/` matches `dest/x` but not `dest2/x`. Empty prefix (`COPY . .`) matches everything. Yields `(repo, src_prefix + remainder)`. |
 | Exact match | Neither prefix is empty and neither ends with `/` | `dest == dest_path` exactly. Yields `(repo, src)`. |
+
+Recorded prefixes are canonical: in a prefix pair, every non-empty side ends
+with `/` (export records `COPY src dest/` as `src/` and `dest/`), and an empty
+`dest` selects prefix matching too. So `src_prefix + remainder` is a plain
+concatenation that always meets on a segment boundary. See the canonical COPY
+shape in `3_RECIPES.md` (Parse Output).
 
 Last matching rule wins (gitignore-style evaluation: all rules evaluated in
 order, last match decides).

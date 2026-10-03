@@ -269,6 +269,13 @@ Global key-value configuration. Simple KV table in SQLite.
 | `copy_size_limit_mb` | int | 64 | Export (max file size for `COPY`) |
 | `binary_extensions` | list | seeded list | Export (`EXCLUDE` --binary) |
 
+`binary_extensions` format (F-55): a comma-separated list. Split on `,` and
+trim whitespace; skip empty entries. Each entry starts with `.`, has at least
+one character after it, and contains no `/`, `\`, `*`, or whitespace. Entries
+are lowercased and matched case-insensitively; duplicates are dropped, keeping
+first-seen order. Export applies the rule when it expands `EXCLUDE --binary`
+(EX-004); validating the value on `settings set` is F-56.
+
 `watch_source_dir` has no default. When set, the value must be an absolute
 path to an existing directory; relative paths and non-existent paths are
 rejected. Empty string means unset. OS-detected download paths surfaced as
@@ -291,7 +298,7 @@ desktop UI is functional.
 |---|---|
 | `db` | `init`, `tables`, `query` (read-only). |
 | `repo` | `add`, `ls`, `tree`, `history`, `rollback`, `rm`, `edit`, `reingest`. |
-| `recipe` | `add`, `new`, `show`, `args`, `edit`, `history`, `rollback`, `ls`, `rm`, `lint`. |
+| `recipe` | `add`, `new`, `show`, `args`, `edit`, `history`, `rollback`, `ls`, `rm`, `lint`. `lint <target>` lints a file when the target is an existing path, and a stored recipe by name otherwise. |
 | `transform` | `add`, `ls`, `run`, `rm`, `reset`. |
 | `template` | `add`, `ls`, `show`, `edit`, `history`, `rollback`, `reset`, `rm`. |
 | `binding` | `add`, `ls`, `rm`, `activate`, `deactivate`, `pin`, `set-arg`. |
@@ -336,4 +343,8 @@ a `kind` discriminator and structured detail.
 
 Parse errors carry line and column. Transform errors carry the module name and,
 when available, the JS line number.
+
+Recipe parse errors set `detail` to `{"line", "col", "recipe", "version"}` from
+the innermost location: `recipe` and `version` name the invoked recipe that
+holds the error, and are null when it is in the recipe itself.
 

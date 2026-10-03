@@ -51,6 +51,15 @@ and appends a new history row.
 
 Every pointer move (edit, rollback, restore, upgrade) triggers a watch state
 reload.
+
+**Recipes (EX-001):** recipe create, edit, history, rollback, and soft delete
+live in `recipe/store.rs`, and each recipe pointer move bumps `change_counter`
+in the same transaction. Two rules beyond the model above: an edit whose text
+is byte-identical to the current version is a no-op (no new version, no bump),
+and a rollback moves the pointer first, then reports any problem the target
+now has without failing. Version numbers count soft-deleted rows, so
+`(parent_id, version)` never collides. DA-004 generalizes this to transforms,
+templates, and repos.
 ### Operations diagram
 
 Referenced by: Versioning contract.
@@ -128,7 +137,10 @@ RUN flatten
 RUN context-manifest
 ```
 
-Name: `shipped-default`.
+Name: `shipped-default`. The embedded text is exactly this block. The file in
+`builtins/recipes/` also carries a directory comment on line 1, which the
+embed strips. A database seeded before EX-001 keeps the old placeholder text
+until the upgrade rule lands (EX-006).
 
 **Settings:** all keys seeded with defaults (see Settings contract).
 

@@ -18,11 +18,15 @@ the contract or ADR that governs it.
 
 **binding (pipeline binding)** — The activation record for a recipe: one recipe plus ARG values, the "on switch" that produces independent exports and watch behavior. See Binding contract in `3_RECIPES.md`.
 
+**bound mode** — Recipe analysis with every ARG value known, as export runs it: every check runs on final strings, and a required ARG with no value is an error. Contrast open mode. See Recipe grammar contract in `3_RECIPES.md`.
+
 **build recipe** — A block-structured text file describing how to export a set of repos; the text in `build_recipe_versions.source` is the only stored form. See Recipe grammar contract in `3_RECIPES.md`.
 
 **builtin protection** — The rule that `curation=builtin` entities cannot be soft-deleted or hard-deleted; edits insert new versions, and restore-from-shipped reads the embedded binary content. See Versioning contract in `6_VERSIONING.md`.
 
 **candidate** — A target `(repo, source_path, binding, COPY key)` proposed by one binding's rule match during watch resolution; candidates agreeing on `(repo_id, source_path)` merge into a claim. See Resolution contract in `5_WATCH.md`.
+
+**canonical COPY shape** — How a `COPY` block's `src` and `dest` are recorded: in a prefix pair (either side empty or ending in `/`) every non-empty side ends with `/`, so watch's `src_prefix + remainder` is segment-aligned; a pair with neither side empty nor ending in `/` is exact. See Parse output contract in `3_RECIPES.md` and COPY matching rules in `5_WATCH.md`.
 
 **chain (file_history)** — A sequence of snapshot and diff entries for one file in one pipeline, keyed by `(placed_by, repo_id, file_path)`, with a snapshot every 5th entry. See File history contract in `6_VERSIONING.md`.
 
@@ -133,6 +137,8 @@ the contract or ADR that governs it.
 **Merkle hash** — A directory node's hash computed over sorted `(child_name, child_hash)` pairs using BLAKE3; the root hash identifies the whole repo state for the short-circuit. See Trie contract in `2_INGEST.md`.
 
 **new_directory (flag type)** — A watch match flag where the target path exceeds the recipe's depth tolerance. See Watch flow (flag types) in `5_WATCH.md`.
+
+**open mode** — Recipe analysis when the recipe is saved, shown, or linted: required ARGs without a value stay symbolic (`${repo}` passes through as text) and checks that depend on their values wait for bound mode. Open mode never rejects a recipe that a binding supplying its required ARGs would accept. See Recipe grammar contract in `3_RECIPES.md`.
 
 **OVERRIDE_WITH** — A `COPY`-level instruction that replaces `COPY_DEFAULT_WITH` for that block; `OVERRIDE_WITH []` means no per-file transforms. See Recipe grammar contract in `3_RECIPES.md`.
 

@@ -17,11 +17,11 @@ path (export) and watch derives the reverse path from them automatically.
 | Recipe | `COPY_DEFAULT_WITH [transforms]` | Sets the default per-file transform chain. Sequential: if absent, the default is empty. A second declaration overrides the first. Scoped to the recipe it's declared in; an invoked recipe's default does not inherit from the caller. |
 | Recipe | `SOURCE <repo>:` | Block. Ingests the repo; contains the `COPY` blocks that read from it. |
 | Recipe | `RUN <transform> [--only <glob>...]` | Applies a structural (directory-level) transform to the run folder. |
-| Recipe | `INVOKE <recipe>[@N] [name=value ...]` | Expands another recipe's instructions in place. Self-contained: brings its own SOURCEs and `COPY_DEFAULT_WITH`. `COPY` keys must be unique across the expanded recipe (collision at expansion time is a parse error). Depth limit 100; cycle detection. |
+| Recipe | `INVOKE <recipe>[@N] [name=value ...]` | Expands another recipe's instructions in place. Self-contained: brings its own SOURCEs and `COPY_DEFAULT_WITH`. `COPY` keys must be unique across the expanded recipe (collision at expansion time is a parse error). Depth limit 100 levels; cycle detection along the expansion path; at most 10,000 expanded SOURCE, COPY, and RUN instructions. |
 | Recipe | `WATCH:` | Optional block. Watch configuration for this recipe: depth tolerance and reverse chain overrides. |
-| Inside `WATCH` | `DEPTH_TOLERANCE <n>` | Max missing levels (file + dirs) for auto-placement. Default 2. |
+| Inside `WATCH` | `DEPTH_TOLERANCE <n>` | Max missing levels (file + dirs) for auto-placement. Default 2. Only the exported recipe's value applies; an invoked recipe's is ignored (lint L006, ADR-041). |
 | Inside `WATCH` | `OVERRIDE:` | Optional sub-block. Per-`COPY`-key reverse chain overrides. |
-| Inside `OVERRIDE` | `<key> [transforms]` | Replaces the derived reverse for this `COPY` key. |
+| Inside `OVERRIDE` | `<key> [transforms]` | Replaces the derived reverse for this `COPY` key. The key may use `${NAME}`. |
 | Inside `SOURCE` | `COPY <src> <dest> AS <key>:` | Block. Copies files from this `SOURCE`, applies per-file transforms, records excludes. |
 | Inside `COPY` | `EXCLUDE <pattern>...` | Deletes matching paths from this `COPY`'s contribution. |
 | Inside `COPY` | `OVERRIDE_WITH [transforms]` | Replaces `COPY_DEFAULT_WITH` for this block. |
@@ -56,9 +56,11 @@ COPY <src> <dest> AS <key>:
 ```
 
 - `AS <key>` is mandatory. Gives the block a stable name for the export state
-  record and for WATCH `OVERRIDE` references. Keys must be unique within a
-  recipe. Explicit keys stay stable across recipe edits; auto-generated keys
-  would break WATCH `OVERRIDE` references and export state matching.
+  record and for WATCH `OVERRIDE` references. Keys must be unique across the
+  expanded recipe, compared after substitution; a key may use `${NAME}` so an
+  invoked recipe can be expanded once per repo. Explicit keys stay stable
+  across recipe edits; auto-generated keys would break WATCH `OVERRIDE`
+  references and export state matching.
 - `EXCLUDE` lines delete matching paths from this `COPY`'s contribution to the
   run folder. Gitignore-style globs. `EXCLUDE --binary` deletes by extension
   list.
@@ -70,8 +72,9 @@ COPY <src> <dest> AS <key>:
 - Every transform in a `COPY` chain must be a file transform. `reverses` is
   optional: a transform without a reverse is skipped on return (the file keeps
   that transformation). Lint warns on non-reversible transforms in a chain.
-  Lint errors if `enrichment-injection` is present without a reachable
-  `enrichment-trim` reverse.
+  Lint warns (it never errors) when a WATCH `OVERRIDE` drops `enrichment-trim`
+  from a key whose chain injects enrichment; without an override, return step
+  2 always runs `enrichment-trim` (see Return Step in `5_WATCH.md`).
 
 ### Two transform types
 
@@ -116,9 +119,21 @@ replaces this entire derived chain for the named key.
 If `WATCH` is absent, default depth tolerance applies and every `COPY` block
 reverses using its declared reverses. If `OVERRIDE` is absent, all keys use
 the derived chain. A WATCH `OVERRIDE` that differs from the declared reverses is
-flagged by lint (informational, not blocking).
+flagged by lint (L003, informational, not blocking). The comparison follows
+the Return Step order, `enrichment-trim` first, so an override written in pure
+reversal order (as in the example below) is flagged.
+
+**Across `INVOKE`:** an invoked recipe's `DEPTH_TOLERANCE` is ignored, with lint
+L006 (ADR-041). `OVERRIDE` entries from every recipe in the expansion merge into
+one map: for each key, the entry closest to the exported recipe wins, ties go to
+the recipe expanded first, and every entry that loses is lint L007. Every
+`OVERRIDE` key must name a `COPY` block somewhere in the expansion.
 
 ### Example recipe
+
+Illustrative: it uses the custom transforms `strip-vendor-headers` and
+`custom-vendor-restore`, so it does not save until those exist. Its
+`vendor-files` override is in reversal order, which draws L003.
 
 ```
 ARG repo
@@ -165,7 +180,9 @@ RUN context-manifest
 
 Seeded at migration. The binding supplies `repo`. Makes every output path start
 with the repo name, which keeps mappings disjoint across repos and lets the AI
-see which project a file belongs to.
+see which project a file belongs to. The embedded text is exactly this block;
+the file in `builtins/recipes/` also carries a directory comment on line 1,
+which the embed strips.
 
 ### Parser and storage
 
@@ -178,6 +195,17 @@ grammar.
 Recipe text is stored in `build_recipe_versions.source` and versioned via
 pointer-based versioning (edit = insert new version + move pointer, rollback =
 move pointer to old row). See the Versioning contract.
+
+The language reference, including the lexical rules, is `docs/RECIPE.md`. This
+file keeps the contracts; RECIPE.md is the authority for lexical detail.
+
+Saving validates in **open mode**: required ARGs without a value stay symbolic
+(`${repo}` passes through as text) and checks that depend on their values
+wait. Export resolves in **bound mode**, where every value is known and every
+check runs on final strings. Open mode never rejects a recipe that a binding
+supplying its required ARGs would accept. Unknown transform and recipe names
+are errors at save time; repo names are checked when a binding resolves
+them.
 ### Recipe Grammar
 
 
@@ -191,19 +219,20 @@ form. A hand-rolled line parser in `flatten-core` produces the parse output.
 | Comments | `#` to end of line |
 | Continuation | `\` at end of line joins the next line |
 | Quoting | Double-quoted args with escapes (`\"`, `\\`, `\n`, `\t`) |
-| Substitution | `${NAME}` in any argument, resolved before validation |
+| Substitution | `${NAME}`, resolved before validation, in: the `SOURCE` repo; `COPY` src, dest, and key; `EXCLUDE` patterns; flag values; `--only` globs; `INVOKE` values; `OVERRIDE` keys. Not in keywords, ARG names, transform and recipe names, version pins, flag names, or `DEPTH_TOLERANCE`: names resolve at save time. |
 | Indentation | Significant for nesting (`SOURCE` > `COPY` > `EXCLUDE`/`OVERRIDE_WITH`, WATCH > `OVERRIDE`) |
-| Blocks | Opened by a trailing `:` on the parent line |
+| Blocks | Opened by a trailing `:` on `SOURCE`, `COPY`, `WATCH`, or `OVERRIDE`; optional on a block with no children (F-17); literal on any other instruction |
+| Lexical detail | `docs/RECIPE.md` (Lexical rules) is the authority (F-22) |
 
 **Recipe-level instructions (execute in file order, no ordering constraints):**
 
 | Instruction | Syntax | Semantics |
 |---|---|---|
-| ARG | `ARG name[=default]` | Declares a variable. Defaults may reference earlier ARGs. Without a default, the binding must supply it. |
+| ARG | `ARG name[=default]` | Declares a variable. Defaults may reference earlier ARGs. Without a default, the binding must supply it. Defaults must be valid on their own: they are checked as real values when the recipe is saved. |
 | `COPY_DEFAULT_WITH` | `COPY_DEFAULT_WITH [t1, t2 ...]` | Sets the default per-file transform chain. Sequential: absent = empty, second declaration overrides. Scoped to the recipe (invoked recipes don't inherit). |
 | `SOURCE` | `SOURCE <repo>:` | Block. Ingests the repo. Contains the `COPY` blocks that read from it. |
 | `RUN` | `RUN <transform> [--only <glob>...]` | Applies a directory transform. View depends on what has executed so far. |
-| `INVOKE` | `INVOKE <recipe>[@N] [name=value ...]` | Recursive: expands into current execution. Self-contained (own SOURCEs, own `COPY_DEFAULT_WITH`). Depth limit 100; cycle detection via visited set keyed by `(build_recipe_id, resolved_version)`. Same recipe at different versions is not a cycle. |
+| `INVOKE` | `INVOKE <recipe>[@N] [name=value ...]` | Recursive: expands into current execution. Self-contained (own SOURCEs, own `COPY_DEFAULT_WITH`). Depth limit 100 levels below the exported recipe. Cycle detection along the current expansion path, keyed by `(build_recipe_id, version_id)`, with the exported recipe on the path from the start. Same recipe at different versions is not a cycle, nor is invoking one recipe twice in sequence. At most 10,000 expanded SOURCE, COPY, and RUN instructions. |
 | WATCH | `WATCH:` | Optional block. Contains `DEPTH_TOLERANCE` and `OVERRIDE`. |
 
 **Inside `SOURCE`:**
@@ -236,9 +265,10 @@ form. A hand-rolled line parser in `flatten-core` produces the parse output.
 
 - Every transform must be a file transform.
 - `reverses` is optional: a transform without a reverse is skipped on return.
-- Lint warns on non-reversible transforms in a chain.
-- Lint errors if `enrichment-injection` is present without a reachable
-  `enrichment-trim` reverse.
+- Lint warns on non-reversible transforms in a chain (L001).
+- Lint warns when a WATCH `OVERRIDE` drops `enrichment-trim` from a key whose
+  chain injects enrichment (L002). Without an override, return step 2 always
+  trims.
 
 **ARG resolution order:** recipe default → binding `arg_values` → `--arg
 NAME=value` on the command line.
@@ -252,12 +282,19 @@ Absent = follow `current_version_id`.
 
 **Lint (warnings only, never errors):**
 
-| Lint | Reason |
-|---|---|
-| Non-reversible transform in a `COPY` chain | Returned files will keep that transformation |
-| `enrichment-injection` without `enrichment-trim` as its reverse | Watch can't strip the enrichment |
-| WATCH `OVERRIDE` differs from derived reverses | Informational: custom return path |
-| Directory transform declares `reverses` | Ignored by watch; `reverses` is file-only |
+| Code | Lint | Reason |
+|---|---|---|
+| L001 | Non-reversible transform in a `COPY` chain | Returned files will keep that transformation |
+| L002 | A WATCH `OVERRIDE` lacks `enrichment-trim` for a key whose chain injects enrichment (without `--reversible=false`) | The override replaces return steps 2 and 3, so nothing strips the enrichment |
+| L003 | WATCH `OVERRIDE` differs from the default return path (compared in Return Step order: `enrichment-trim` first, then reverses; non-reversible transforms omitted) | Informational: custom return path |
+| L004 | Directory transform declares `reverses` | Ignored by watch; `reverses` is file-only |
+| L005 | A resolved `COPY` chain lacks `enrichment-injection`, including `OVERRIDE_WITH []` | The files will not round-trip through watch |
+| L006 | An invoked recipe's `DEPTH_TOLERANCE` | Ignored; only the exported recipe's applies (ADR-041) |
+| L007 | An invoked recipe's `OVERRIDE` entry replaced by one closer to the exported recipe (or expanded earlier) | The losing entry has no effect |
+| L008 | A transform in a `COPY` chain has several reversers | The default return path is ambiguous; L003 is skipped for that key |
+
+COPY-level warnings point at the `COPY` block. Warnings inside invoked recipes
+carry `name@version`. See `docs/RECIPE.md` for messages and positions.
 
 **Shipped generic recipe:**
 
@@ -280,19 +317,34 @@ the text is canonical.
 
 ```
 Recipe {
-    args: Vec<Arg>,             // name, default (Option), position
+    args: Vec<Arg>,             // the exported recipe's ARGs, in file order
     instructions: Vec<Instruction>,  // flattened, INVOKEs expanded
-    watch_config: WatchConfig,  // depth_tolerance, overrides
-    invoked_versions: Vec<VersionId>, // every INVOKE's resolved version
+    watch_config: WatchConfig,  // depth_tolerance, overrides (merged across INVOKE)
+    invoked_versions: Vec<InvokedVersion>, // every invoked version, nested included,
+                                           // deduplicated, first-seen order
+    unbound: Vec<String>,       // required ARGs left symbolic (open mode only)
+}
+
+InvokedVersion {
+    version_id: i64,            // build_recipe_versions.id
+    name: String,
+    version: u32,
 }
 
 Arg {
     name: String,
-    default: Option<String>,    // may reference earlier ARGs
+    default: Option<String>,    // as written; may reference earlier ARGs
+    required: bool,
     position: Position,
 }
 
-Instruction = SOURCE | COPY | RUN
+Position {
+    line: u32, col: u32,        // 1-based; columns count characters
+    recipe_version_id: Option<i64>,  // set inside invoked recipes
+}
+
+Instruction = Source(SourceInstruction) | Run(RunInstruction)
+                                // COPY nests inside SOURCE, never top level
 
 SourceInstruction {
     repo_name: String,          // post-substitution
@@ -301,18 +353,20 @@ SourceInstruction {
 }
 
 CopyBlock {
-    src: String,                // post-substitution
-    dest: String,               // post-substitution, normalized
-    key: String,                // AS <key>
-    excludes: Vec<Pattern>,
+    src: String,                // post-substitution, normalized, canonical shape
+    dest: String,               // post-substitution, normalized, canonical shape
+    key: String,                // AS <key>, post-substitution
+    excludes: Vec<Exclude>,     // Pattern(String) | Binary
     forward_chain: Vec<TransformRef>,  // resolved from COPY_DEFAULT_WITH or OVERRIDE_WITH
     position: Position,
 }
 
 TransformRef {
     name: String,
-    version: ResolvedVersion,   // pinned or current
-    args: Map<String, String>,  // defaults applied
+    transform_id: i64,
+    version_id: i64,            // transform_versions.id
+    version: u32,               // pinned or current
+    args: Map<String, String>,  // the flags as given; defaults [DEFERRED: EX-002B]
 }
 
 RunInstruction {
@@ -327,8 +381,20 @@ WatchConfig {
 }
 ```
 
-Every parse error carries line and column. The parse output retains positions
-for every instruction so the export state record can reference them.
+Every parse error carries line and column; an error inside an invoked recipe
+also names that recipe and version and the chain of INVOKE lines that led
+there. The parse output retains positions for every instruction so the export
+state record can reference them. Analysis returns the recipe together with its
+lint warnings (`Resolution { recipe, warnings }`).
+
+**Canonical COPY shape:** `src` and `dest` are recorded so watch can pick the
+matching algorithm from them alone. A pair is a prefix when either side is
+empty or either side ends in `/`; then every non-empty side is recorded with a
+trailing `/` (`COPY src dest/` records `src/` and `dest/`). A pair with both
+sides non-empty and neither ending in `/` is exact. File-into-directory forms
+(`COPY README.md .`) become prefixes that match nothing when the source is a
+file; EX-004 reports a COPY whose prefix matches zero trie entries. See
+`docs/RECIPE.md` (Paths and COPY shapes) for the table.
 
 ## Components: Transform
 
