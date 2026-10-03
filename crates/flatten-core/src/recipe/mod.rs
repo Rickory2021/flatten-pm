@@ -113,6 +113,8 @@ pub fn analyze(
         }
         _ => parse::resolve::resolve(&ast, input, catalog, root)?,
     };
+    // Lint looks up transforms only (`transform`, `reversers_of`), which the
+    // overlay delegates unchanged, so the plain catalog is equivalent here.
     warnings.extend(lint::lint(&recipe, catalog)?);
     lint::sort_warnings(&mut warnings, &recipe);
     Ok(Resolution { recipe, warnings })

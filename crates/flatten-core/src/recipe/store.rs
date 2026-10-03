@@ -17,8 +17,9 @@
 // moves `current_version_id`. Each pointer move bumps the change counter in
 // the same transaction (DA-004 [D10]). An edit whose text is byte-identical
 // to the current version writes nothing and does not analyze. Rollback moves
-// the pointer first, then reports any problem the target now has without
-// failing (export and show will hit it).
+// the pointer first, then checks the target: an error becomes `problem`
+// (export and show will hit it) and never fails the call; a clean check
+// returns its warnings, like add and edit.
 //
 // Names follow the transform rule, [A-Za-z0-9][A-Za-z0-9_.-]*, and stay
 // taken after a soft delete. The active-binding guard on delete is
@@ -98,9 +99,11 @@ pub struct RollbackReport {
     pub version: u32,
     /// False when the target was already current (nothing written).
     pub moved: bool,
-    /// What analysis of the now-current version reports, if anything. A
+    /// The error analysis of the now-current version reports, if any. A
     /// rollback never fails because of it.
     pub problem: Option<Error>,
+    /// Warnings from that analysis; empty when `problem` is set.
+    pub warnings: Vec<LintWarning>,
 }
 
 /// A live recipe's head row.
@@ -296,7 +299,8 @@ fn edit_in(conn: &Connection, name: &str, source: &str) -> Result<SaveReport> {
 }
 
 /// Move the current pointer to an existing live version. Then analyze the
-/// now-current version and report any problem without failing.
+/// now-current version: an error is reported as `problem` (the call still
+/// succeeds); otherwise its warnings are returned.
 pub fn rollback_recipe(writer: &Writer, name: &str, version: u32) -> Result<RollbackReport> {
     let name = name.to_string();
     in_write_tx(writer, move |conn| rollback_in(conn, &name, version))
@@ -336,11 +340,16 @@ fn rollback_in(conn: &Connection, name: &str, version: u32) -> Result<RollbackRe
         name: name.to_string(),
         version,
     };
-    let problem = analyze(&source, &ArgInput::Open, &DbCatalog::new(conn), &root).err();
+    let (problem, warnings) = match analyze(&source, &ArgInput::Open, &DbCatalog::new(conn), &root)
+    {
+        Ok(resolution) => (None, resolution.warnings),
+        Err(e) => (Some(e), Vec::new()),
+    };
     Ok(RollbackReport {
         version,
         moved,
         problem,
+        warnings,
     })
 }
 
@@ -639,6 +648,54 @@ mod tests {
         );
     }
 
+    /// A write that fails after the parent row is inserted leaves nothing:
+    /// the store commits only when the whole operation succeeds. (With no
+    /// change_counter row, `add` fails at the bump, after its inserts.)
+    #[test]
+    fn add_failure_after_parent_insert_writes_nothing() {
+        let (_tmp, writer, reader) = setup();
+        writer
+            .call_write(|conn| {
+                conn.execute("DELETE FROM change_counter", [])?;
+                Ok(())
+            })
+            .expect("remove the counter row");
+        assert!(
+            matches!(
+                add_recipe(&writer, "partial", "ARG a"),
+                Err(Error::Database(_))
+            ),
+            "the failed bump surfaces as a database error"
+        );
+        assert_eq!(
+            (
+                count(
+                    &reader,
+                    "SELECT COUNT(*) FROM build_recipes WHERE name = 'partial'"
+                ),
+                count(
+                    &reader,
+                    "SELECT COUNT(*) FROM build_recipe_versions v JOIN build_recipes r \
+                     ON r.id = v.build_recipe_id WHERE r.name = 'partial'"
+                )
+            ),
+            (0, 0),
+            "neither the parent nor the version row was committed"
+        );
+
+        writer
+            .call_write(|conn| {
+                conn.execute("INSERT INTO change_counter (id, counter) VALUES (1, 0)", [])?;
+                Ok(())
+            })
+            .expect("restore the counter row");
+        assert_eq!(
+            add(&writer, "partial", "ARG a").version,
+            1,
+            "the writer is healthy and the name is still free"
+        );
+    }
+
     /// Test 86: text is stored verbatim: comments, CRLF, BOM, no final newline.
     #[test]
     fn add_stores_source_verbatim() {
@@ -755,7 +812,8 @@ mod tests {
     }
 
     /// Test 91: rollback moves the pointer and bumps; rolling back to the
-    /// current version writes nothing but still checks it.
+    /// current version writes nothing but still checks it; a clean check
+    /// returns its warnings.
     #[test]
     fn rollback_moves_pointer_bumps_and_current_is_noop() {
         let (_tmp, writer, reader) = setup();
@@ -782,9 +840,33 @@ mod tests {
             "already current: nothing moved"
         );
         assert_eq!(counter(&reader), before + 1, "no bump for a no-op");
+
+        add(&writer, "warned", "SOURCE r:\n  COPY . x/ AS k");
+        edit_recipe(&writer, "warned", "").expect("edit");
+        let warned = rollback_recipe(&writer, "warned", 1).expect("rollback");
+        assert_eq!(
+            codes(&warned.warnings),
+            vec![(LintCode::L005, 2, None)],
+            "a clean check returns the target's warnings"
+        );
+
+        add(&writer, "base", "");
+        add(&writer, "top", "INVOKE base");
+        soft_delete_recipe(&writer, "base").expect("delete base");
+        let stale = rollback_recipe(&writer, "top", 1).expect("rollback to current");
+        assert!(!stale.moved, "already current");
+        assert_eq!(
+            kind(stale.problem.expect("the check ran")),
+            ParseErrorKind::UnknownRecipe {
+                name: "base".into()
+            },
+            "the check runs even when nothing moved"
+        );
+        assert!(stale.warnings.is_empty(), "no warnings with a problem");
     }
 
-    /// Test 92: rollback to a missing or soft-deleted version errors.
+    /// Test 92: rollback to a missing or soft-deleted version errors; the next
+    /// version number counts soft-deleted rows.
     #[test]
     fn rollback_unknown_version_errors() {
         let (_tmp, writer, _reader) = setup();
@@ -810,6 +892,23 @@ mod tests {
                 "version {version} is not a rollback target"
             );
         }
+
+        rollback_recipe(&writer, "r", 1).expect("rollback to 1");
+        writer
+            .call_write(|conn| {
+                conn.execute(
+                    "UPDATE build_recipe_versions SET deleted_at = 'x' WHERE version = 3 \
+                     AND build_recipe_id = (SELECT id FROM build_recipes WHERE name = 'r')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("soft-delete v3, the latest");
+        assert_eq!(
+            edit_recipe(&writer, "r", "ARG d").expect("edit").version,
+            4,
+            "numbering counts soft-deleted versions, so UNIQUE never collides"
+        );
     }
 
     /// Test 93: rollback to a version that no longer resolves still moves

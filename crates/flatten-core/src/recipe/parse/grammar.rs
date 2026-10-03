@@ -1127,6 +1127,16 @@ mod tests {
             (ParseErrorKind::MissingColon { instr: "SOURCE" }, 1, 1),
             "a quoted colon is not a block colon"
         );
+        assert_eq!(
+            parse_error("WATCH\n  DEPTH_TOLERANCE 2"),
+            (ParseErrorKind::MissingColon { instr: "WATCH" }, 1, 1),
+            "WATCH with children and no colon"
+        );
+        assert_eq!(
+            parse_error("WATCH:\n  OVERRIDE\n    k []"),
+            (ParseErrorKind::MissingColon { instr: "OVERRIDE" }, 2, 3),
+            "OVERRIDE with children and no colon"
+        );
     }
 
     /// Test 24: indentation errors.
@@ -1141,6 +1151,12 @@ mod tests {
                 3,
             ),
             ("  ARG a", ParseErrorKind::UnexpectedIndent, 1, 3),
+            (
+                "WATCH:\n  OVERRIDE:\n    k []\n      x",
+                ParseErrorKind::UnexpectedIndent,
+                4,
+                7,
+            ),
         ];
         for (source, kind, line, col) in cases {
             assert_eq!(
@@ -1212,6 +1228,19 @@ mod tests {
             ),
             ("ARG a b", syntax("ARG", "ARG <name>[=<default>]"), 1, 1),
             ("ARG", syntax("ARG", "ARG <name>[=<default>]"), 1, 1),
+            ("WATCH x:", syntax("WATCH", "WATCH:"), 1, 1),
+            (
+                "WATCH:\n  OVERRIDE x:",
+                syntax("OVERRIDE", "OVERRIDE:"),
+                2,
+                3,
+            ),
+            (
+                "WATCH:\n  OVERRIDE:\n    k",
+                syntax("OVERRIDE", CHAIN_FORM),
+                3,
+                5,
+            ),
         ];
         for (source, kind, line, col) in cases {
             assert_eq!(

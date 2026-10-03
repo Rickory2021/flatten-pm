@@ -434,7 +434,7 @@ impl Expander<'_> {
                 self.warnings.push(LintWarning {
                     code: LintCode::L007,
                     message: format!(
-                        "WATCH OVERRIDE for {} is replaced by an entry closer to the root recipe",
+                        "WATCH OVERRIDE for {} is replaced by an earlier or closer-to-root entry",
                         entry.key
                     ),
                     position: entry.position,
@@ -2193,7 +2193,8 @@ mod tests {
     }
 
     /// Test 65: WATCH OVERRIDE keys must name a COPY block, checked after
-    /// expansion; open mode skips the check while a key is symbolic.
+    /// expansion (in whichever recipe holds the entry); open mode skips the
+    /// check while a key is symbolic.
     #[test]
     fn watch_override_unknown_key_rules() {
         let unknown = |key: &str| ParseErrorKind::UnknownOverrideKey { key: key.into() };
@@ -2278,6 +2279,28 @@ mod tests {
                 5
             ),
             "keys that collide after substitution are duplicates"
+        );
+
+        let invoked_missing = MemCatalog::builtins().with_recipe(
+            "base",
+            1,
+            1,
+            &[(
+                1,
+                11,
+                "SOURCE r:\n  COPY . b/ AS bk\nWATCH:\n  OVERRIDE:\n    zz []",
+            )],
+        );
+        assert_eq!(
+            located(
+                analyze("INVOKE base", &ArgInput::Open, &invoked_missing, &INPUT),
+                "invoked unknown key"
+            ),
+            (
+                unknown("zz"),
+                at(5, 5, invoked("base", 1), vec![site("<input>", None, 1, 1)])
+            ),
+            "an invoked entry's unknown key points into the invoked recipe"
         );
     }
 
@@ -2376,12 +2399,77 @@ mod tests {
             nested_resolver,
             vec![LintWarning {
                 code: LintCode::L007,
-                message: "WATCH OVERRIDE for ik is replaced by an entry closer to the root recipe"
+                message: "WATCH OVERRIDE for ik is replaced by an earlier or closer-to-root entry"
                     .into(),
                 position: stamped(5, 5, 21),
                 recipe: Some("inner@1".into()),
             }],
             "the replaced nested entry is L007"
+        );
+
+        // Siblings at the same depth: the first expanded wins; the second is L007.
+        let siblings = MemCatalog::builtins()
+            .with_recipe(
+                "s1",
+                4,
+                1,
+                &[(1, 41, "WATCH:\n  OVERRIDE:\n    shared [enrichment-trim]")],
+            )
+            .with_recipe("s2", 5, 1, &[(1, 51, "WATCH:\n  OVERRIDE:\n    shared []")]);
+        let tie = analyze(
+            "SOURCE r:\n  COPY . x/ AS shared\nINVOKE s1\nINVOKE s2",
+            &ArgInput::Open,
+            &siblings,
+            &INPUT,
+        )
+        .expect("resolves");
+        assert_eq!(
+            tie.recipe
+                .watch_config
+                .overrides
+                .get("shared")
+                .map(|c| chain_names(c)),
+            Some(vec!["enrichment-trim"]),
+            "the first expanded sibling wins a tie"
+        );
+        let tie_l007: Vec<(Position, Option<&str>)> = tie
+            .warnings
+            .iter()
+            .filter(|w| w.code == LintCode::L007)
+            .map(|w| (w.position, w.recipe.as_deref()))
+            .collect();
+        assert_eq!(
+            tie_l007,
+            vec![(stamped(3, 5, 51), Some("s2@1"))],
+            "the later sibling's entry is L007"
+        );
+
+        // A recipe version invoked twice reports its ignored DEPTH_TOLERANCE once.
+        let twice = MemCatalog::builtins().with_recipe(
+            "deep",
+            6,
+            1,
+            &[(
+                1,
+                61,
+                "ARG k\nSOURCE r:\n  COPY . ${k}/ AS ${k}\nWATCH:\n  DEPTH_TOLERANCE 4",
+            )],
+        );
+        let doubled = analyze(
+            "INVOKE deep k=a\nINVOKE deep k=b",
+            &ArgInput::Open,
+            &twice,
+            &INPUT,
+        )
+        .expect("resolves");
+        assert_eq!(
+            doubled
+                .warnings
+                .iter()
+                .filter(|w| w.code == LintCode::L006)
+                .count(),
+            1,
+            "identical warnings collapse to one"
         );
     }
 }

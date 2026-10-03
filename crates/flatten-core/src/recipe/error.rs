@@ -42,7 +42,7 @@ pub enum Error {
     Database(#[from] crate::db::error::Error),
 
     /// A recipe name already in use, by a live or a soft-deleted recipe.
-    #[error("recipe name {name} is already taken (soft-deleted recipes keep their names)")]
+    #[error("duplicate recipe name: {name} (including soft-deleted recipes)")]
     DuplicateName {
         /// The name.
         name: String,
@@ -65,7 +65,7 @@ pub enum Error {
         version: u32,
     },
     /// A builtin recipe cannot be deleted.
-    #[error("recipe {name} is builtin and cannot be deleted")]
+    #[error("cannot delete builtin recipe: {name}")]
     BuiltinProtected {
         /// The recipe name.
         name: String,

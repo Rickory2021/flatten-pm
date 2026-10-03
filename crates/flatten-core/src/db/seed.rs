@@ -305,10 +305,10 @@ mod tests {
         );
 
         let root = RootRef::Stored {
-            recipe_id: 1,
-            version_id: 1,
-            name: "shipped-default".into(),
-            version: 1,
+            recipe_id: stored.recipe_id.expect("a stored recipe has an id"),
+            version_id: stored.version_id.expect("a stored version has an id"),
+            name: stored.name.clone(),
+            version: stored.version.expect("a stored version has a number"),
         };
         let resolution = analyze(&stored.source, &ArgInput::Open, &catalog, &root)
             .unwrap_or_else(|e| panic!("the shipped recipe should resolve: {e}"));

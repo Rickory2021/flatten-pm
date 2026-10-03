@@ -561,6 +561,10 @@ mod tests {
              INSERT INTO transform_versions (id, transform_id, version, source, deleted_at)
                  VALUES (42, 41, 2, 's', '2026-01-01T00:00:00Z');
              UPDATE transforms SET current_version_id = 41 WHERE id = 41;
+             INSERT INTO transforms (id, name, scope) VALUES (43, 'cur-gone', 'file');
+             INSERT INTO transform_versions (id, transform_id, version, source, deleted_at)
+                 VALUES (43, 43, 1, 's', '2026-01-01T00:00:00Z');
+             UPDATE transforms SET current_version_id = 43 WHERE id = 43;
              INSERT INTO build_recipes (id, name) VALUES (10, 'gone');
              INSERT INTO build_recipe_versions (id, build_recipe_id, version, source)
                  VALUES (10, 10, 1, 'SOURCE r:\n  COPY . x/ AS k');
@@ -594,6 +598,13 @@ mod tests {
                 .expect("query")
                 .is_some(),
             "the live version still resolves"
+        );
+        assert!(
+            catalog
+                .transform("cur-gone", None)
+                .expect("query")
+                .is_none(),
+            "a soft-deleted current version leaves no current version (as built; DA-004 owns any change)"
         );
         assert!(
             catalog.recipe("gone", None).expect("query").is_none(),

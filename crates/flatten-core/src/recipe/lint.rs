@@ -79,8 +79,10 @@ impl fmt::Display for LintWarning {
 }
 
 /// Sort warnings: root first, then invoked recipes in `invoked_versions`
-/// order, then by line, column, and code.
-pub(crate) fn sort_warnings(warnings: &mut [LintWarning], recipe: &Recipe) {
+/// order, then by line, column, and code. Identical warnings collapse to one:
+/// a recipe version invoked twice (with different ARGs) expands its WATCH
+/// twice and would otherwise repeat the same L006 word for word.
+pub(crate) fn sort_warnings(warnings: &mut Vec<LintWarning>, recipe: &Recipe) {
     let origin = |w: &LintWarning| match w.position.recipe_version_id {
         None => 0,
         Some(id) => recipe
@@ -90,6 +92,7 @@ pub(crate) fn sort_warnings(warnings: &mut [LintWarning], recipe: &Recipe) {
             .map_or(usize::MAX, |i| i + 1),
     };
     warnings.sort_by_key(|w| (origin(w), w.position.line, w.position.col, w.code));
+    warnings.dedup();
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +415,28 @@ mod tests {
                 .is_empty(),
             "without an override, return step 2 trims"
         );
+
+        let invoked = catalog().with_recipe(
+            "base",
+            1,
+            1,
+            &[(
+                1,
+                11,
+                "COPY_DEFAULT_WITH [enrichment-injection]\nSOURCE r:\n  COPY . b/ AS bk",
+            )],
+        );
+        let rooted: Vec<(u32, u32, Option<String>)> =
+            warnings("INVOKE base\nWATCH:\n  OVERRIDE:\n    bk []", &invoked)
+                .into_iter()
+                .filter(|w| w.code == LintCode::L002)
+                .map(|w| (w.position.line, w.position.col, w.recipe))
+                .collect();
+        assert_eq!(
+            rooted,
+            vec![(3, 3, Some("base@1".into()))],
+            "a root override of an invoked COPY points at that COPY, labeled with its recipe"
+        );
     }
 
     /// Test 76: L003, an override that differs from the default return path
@@ -440,6 +465,20 @@ mod tests {
             )
             .is_empty(),
             "an override equal to the default path is not L003"
+        );
+
+        let skipped = warnings(
+            "COPY_DEFAULT_WITH [strip, enrichment-injection]\nSOURCE r:\n  COPY . x/ AS k\nWATCH:\n  OVERRIDE:\n    k [enrichment-trim]",
+            &catalog(),
+        );
+        assert!(
+            with_code(&skipped, LintCode::L003).is_empty(),
+            "Skipped entries are omitted from the comparison: [enrichment-trim] matches"
+        );
+        assert_eq!(
+            with_code(&skipped, LintCode::L001).len(),
+            1,
+            "strip is still reported as L001"
         );
     }
 
