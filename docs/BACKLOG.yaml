@@ -316,7 +316,9 @@ stories:
         GUI call one implementation. F-57: CLI maps unknown-key errors to
         kind "database"; design doc says "domain". F-58: adopt workspace-level
         clippy unwrap_used/expect_used deny once src-cli's non-test expect/unwrap
-        calls are removed.
+        calls are removed. F-68: CLI io errors (repo and recipe commands) carry
+        the path in the message only; the Error Model shows a separate "path"
+        field.
 
     DA-002:
       story: >
@@ -412,7 +414,16 @@ stories:
         have it parsed into an executable structure, and persist it as a versioned
         row, so that recipes are portable files and stored history at once.
       stage: s1
-      status: backlog
+      status: done-deferred
+      # [DEFERRED: EX-002B] TransformRef.args defaults: needs the transform arg schema (F-23)
+      # [DEFERRED: DA-005] recipe rm active-binding guard: needs binding CRUD
+      # [DEFERRED: DA-005, EX-005] ARG layering across binding arg_values and --arg: resolve takes the merged map
+      # [DEFERRED: EX-006] databases seeded before EX-001 keep the placeholder shipped recipe text
+      # [RESOLVED: EX-001] F-17 block colon optional on a childless block
+      # [RESOLVED: EX-001] F-22 lexical rules documented in docs/RECIPE.md
+      # [RESOLVED: EX-001] F-55 binary_extensions format settled in the Settings contract; implemented in EX-004
+      # [FINDING] F-60 to F-66 and F-68 filed on EX-005, EX-004, WA-004, EX-002B, DA-005, and CLI-001
+      # [FINDING] F-67 ADR count stated as 54 and 40; docs/ADR.md has 45
       acceptance_criteria:
         - "Grammar documented in docs/RECIPE.md: line-oriented, # comments, backslash continuation, double-quoted args with escapes, ${NAME} substitution, significant indentation for nesting, blocks opened by trailing :"
         - "Recipe-level instructions (execute in file order): ARG name[=default], COPY_DEFAULT_WITH [transforms], SOURCE <repo>:, RUN <transform> [--only <glob>...], INVOKE <recipe>[@N] [name=value ...], WATCH:"
@@ -422,7 +433,7 @@ stories:
         - "WATCH: optional block; contains DEPTH_TOLERANCE <n> (default 2) and OVERRIDE: sub-block with per-key reverse chain overrides"
         - "COPY_DEFAULT_WITH sets the default per-file transform chain; sequential (absent = empty, second declaration overrides); scoped to the declaring recipe (invoked recipes don't inherit)"
         - "Every transform in a COPY chain must be a file transform"
-        - "ARG defaults may reference earlier ARGs; resolution order: recipe default -> binding arg_values -> --arg NAME=value on CLI"
+        - "ARG defaults may reference earlier ARGs; resolution order: recipe default -> binding arg_values -> --arg NAME=value on CLI [DEFERRED: DA-005, EX-005, the layering is the caller's; resolve takes one merged map]"
         - "INVOKE <recipe>[@N] [name=value ...]: expands into current execution; self-contained (own SOURCEs, own COPY_DEFAULT_WITH); ARG binding: explicit name=value -> caller's ARG of same name -> invoked recipe's default; required ARG still unbound is an error naming both recipes; invoked ARGs local; depth limit 100; cycle detection via visited set keyed by (build_recipe_id, resolved_version)"
         - "RUN <transform>[@N] [--only <glob>...]: applies a directory transform; @N pins version; --only filters the folder view"
         - "Every SOURCE name, COPY path, EXCLUDE pattern, RUN arg, and INVOKE value substituted before validation (rules recorded post-substitution)"
@@ -441,12 +452,31 @@ stories:
         - "flatten recipe show basic --raw prints the source byte-identical to the input file"
         - "cargo test -p flatten-core recipe::parse covers quoting, continuation, ${ARG} substitution, ARG-in-default, COPY inside SOURCE nesting, AS key uniqueness, COPY_DEFAULT_WITH and OVERRIDE_WITH resolution, WATCH block parsing, DEPTH_TOLERANCE, OVERRIDE chain parsing, INVOKE binding order, --only parsing"
       notes: >
-        F-17: shipped recipe colon grammar (optional for childless blocks) to
-        be settled during parser implementation. F-22: lexical rules subsection
-        in grammar contract to be documented in RECIPE.md. F-31: committed
-        comment "line" should be "span" in the enrichment contract. F-55:
-        binary_extensions format is unspecified (leading dot, case, spaces);
-        the parse rule belongs in EXCLUDE --binary implementation.
+        F-17, F-22, and F-55 are resolved: the block colon is optional on a
+        childless block; the lexical rules live in docs/RECIPE.md; the
+        binary_extensions format is in the Settings contract
+        (1_INFRASTRUCTURE.md) and is implemented with EXCLUDE --binary in
+        EX-004. F-31: committed comment "line" should be "span" in the
+        enrichment contract.
+
+        As built (docs/RECIPE.md is the language reference; 3_RECIPES.md,
+        5_WATCH.md, and 6_VERSIONING.md carry the contracts): INVOKE cycle
+        detection follows the current expansion path rather than a global
+        visited set, so invoking one recipe twice in sequence is legal;
+        expansion is capped at 10,000 SOURCE, COPY, and RUN instructions; an
+        invoked recipe's WATCH OVERRIDE entries merge, with the entry closest
+        to the exported recipe winning; lint has eight codes (L001 to L008),
+        all warnings, and L002 applies only to override chains; COPY prefixes
+        are recorded in canonical shape; COPY and OVERRIDE keys substitute,
+        names never do; an edit with byte-identical text is a no-op; the
+        recipe change_counter bump is pulled forward from DA-004; saving
+        validates in open mode and export in bound mode, and bound mode
+        rejects supplied ARGs the recipe never declares.
+
+        F-67: docs/ADR.md holds 45 records (ADR-001 to ADR-045), but
+        PROJECT_INSTRUCTIONS.md and 0_SUMMARY.md say 54 and 6_VERSIONING.md
+        says 40. Unassigned; a docs pass should state the count once or drop
+        it.
 
     EX-002B:
       story: >
@@ -481,7 +511,10 @@ stories:
         F-50: QuickJS context-per-invocation memory measurement to be done
         during implementation to validate the 256MB default. F-23: transform
         metadata and arg schema (exported meta object) to be settled during
-        implementation.
+        implementation; recipe TransformRef.args holds only the flags given
+        until then. F-65: custom transform names must satisfy
+        [A-Za-z0-9][A-Za-z0-9_.-]*, the recipe name rule, or recipes cannot
+        reference them.
 
     EX-006:
       story: >
@@ -559,11 +592,22 @@ stories:
         - "RUN context-manifest renders the accumulated context to _CONTEXT.yaml through the context-manifest template (kind=file); --template <name[@N]> selects; opt-in (only runs if recipe includes RUN context-manifest)"
         - "Default template documents: encoding convention, dotfile mapping, enrichment convention with exact form, exclusion log, instruction to preserve enrichment, repo-name statement"
         - "context-manifest written as an emitted file"
+        - "A COPY whose recorded prefix matches zero trie entries is reported in the run report (warning or error: this story decides); canonical shapes make file-into-directory forms such as COPY README.md . into such prefixes when the source is a file"
       verification:
         - "flatten export on fixtures/recipes/stack.recipe (two SOURCEs copying README.md to same path) yields the second one and an overlap warning"
         - "flatten export on fixtures/recipes/scoped.recipe (RUN upper --only vendor/**) upper-cases only files under vendor/"
         - "_CONTEXT.yaml from fixtures/recipes/context.recipe contains exclusion list, rendered enrichment form, and repo-name statement"
         - "cargo test -p flatten-core export::compose covers execution order, overlap reporting, scope filtering, context ordering"
+      notes: >
+        The zero-match COPY report is the condition under which EX-001 records
+        file-into-directory COPY forms as prefixes instead of rejecting them;
+        file-into-directory semantics, if wanted, are a design change here
+        (the recipe text stays canonical, so re-parsing derives a new shape).
+        F-62: reject an empty --only glob wherever it arrives: a substituted
+        value (--only ${g} with g bound to ""), or a quoted literal (--only "",
+        --only=""); the bare --only= is already a parse error. F-63: implement
+        the binary_extensions format rule (Settings contract, F-55) when
+        expanding EXCLUDE --binary.
 
     DA-005:
       story: >
@@ -587,6 +631,11 @@ stories:
       notes: >
         The old backlog stored export_dir on the binding; the design derives it
         at runtime. No export_root setting exists; paths resolve under app data.
+        F-66: soft-deleting a recipe that other recipes INVOKE breaks them at
+        their next resolve, with no guard; the recipe rm guard should cover
+        invokers as well as active bindings. Recipe ARG layering (recipe
+        default, then binding arg_values, then --arg) belongs to the caller
+        here: recipe resolution takes one merged map.
 
     EX-005:
       story: >
@@ -626,7 +675,18 @@ stories:
         shell/GUI prompts for force). The flatten-core function returns an enum;
         the CLI and GUI handle the prompt. F-51: dest_path hardening (control
         chars, length, reserved names, case) to be enforced at COPY time;
-        settle during implementation.
+        settle during implementation. F-60: resolve the recipe in bound mode
+        (recipe::resolve_stored with ArgInput::Bound) as the first export
+        step, before any filesystem work. Open mode leaves these unchecked
+        until then: collisions between different symbolic keys, EXCLUDE
+        patterns that hold variables, `..` or control characters arriving
+        through values, empty SOURCE names and keys from values,
+        UnknownOverrideKey while keys are symbolic, and any root default the
+        binding overrides. F-61: the recorded derived_reverse_chain shape is
+        this story's to define: reverse versions, whether reverse args mirror
+        the forward args, and whether enrichment-trim appears in it given
+        Return Step 2. EX-001 lint mirrors the Return Step by transform name
+        only.
 
   watch-pipeline:
 
@@ -729,6 +789,12 @@ stories:
         - "A file with no enrichment is skipped (not flagged)"
         - "flatten flag explain <file> runs detection without placing and prints every rule evaluated, every candidate with status, matched pattern, and reverse chain"
         - "cargo test -p flatten-core watch::detect table tests: enrichment in each shipped entry, enrichment after shebang, after front matter, .txt-renamed, CRLF, BOM, binary rejected, absolute path rejected"
+      notes: >
+        F-64: the COPY matching table relies on canonical prefixes (5_WATCH.md,
+        COPY matching rules): in a prefix pair every non-empty side ends with
+        /, and an empty dest selects prefix matching, so src_prefix +
+        remainder is a plain segment-aligned concatenation. Matching code may
+        assume this shape for rows EX-001 or later recorded.
 
     WA-011:
       story: >
@@ -828,7 +894,14 @@ stories:
         F-12: version row deleted_at; the design includes deleted_at on
         build_recipe_versions and transform_versions; define semantics or drop
         during implementation. F-32: overlapping version patterns (longest
-        match wins) is already the enrichment contract.
+        match wins) is already the enrichment contract. EX-001 landed recipe
+        add, edit, history, rollback, and soft delete (recipe/store.rs and the
+        recipe CLI) with the change_counter bump on every recipe pointer move;
+        this story generalizes them to transforms, templates, and repos, and
+        the recipe parts of its verification already pass. As built, a
+        soft-deleted current version reads as absent, so an unpinned lookup
+        reports the entity missing; the design says a current version is never
+        prunable, so this should not arise, and F-12's semantics decide it.
 
     DA-003:
       story: >
