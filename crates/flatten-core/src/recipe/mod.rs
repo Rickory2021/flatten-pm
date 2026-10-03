@@ -8,15 +8,16 @@
 // `types.rs` are the parse output contract (docs/design/3_RECIPES.md).
 // Transform lookups go through the `Catalog` trait (`catalog.rs`).
 //
-// Implemented so far (plan chunk C6): every instruction (ARG,
+// Implemented so far (plan chunk C8): every instruction (ARG,
 // COPY_DEFAULT_WITH, SOURCE, COPY with EXCLUDE and OVERRIDE_WITH, RUN,
 // INVOKE, WATCH); resolver warnings (L006, L007); the lint pass (L001 to
-// L005, L008).
+// L005, L008); the SQLite catalog; and the recipe store (`store`).
 
 mod catalog;
 mod error;
 mod lint;
 mod parse;
+mod store;
 mod types;
 
 use catalog::PendingOverlay;
@@ -25,6 +26,11 @@ pub use catalog::{Catalog, DbCatalog, RecipeSource, TransformInfo, TransformScop
 pub use error::{Error, InvokeSite, Location, ParseErrorKind, PathIssue, Result, SourceRef};
 pub use lint::{LintCode, LintWarning};
 pub use parse::resolve::{ArgInput, Resolution, RootRef};
+pub use store::{
+    RecipeDetail, RecipeRow, RollbackReport, SaveReport, VersionRow, add_recipe, edit_recipe,
+    get_recipe, lint_text, list_recipes, new_recipe, recipe_args, recipe_history, resolve_stored,
+    rollback_recipe, soft_delete_recipe,
+};
 pub use types::{
     Arg, CopyBlock, Exclude, Instruction, InvokedVersion, Position, Recipe, RunInstruction,
     SourceInstruction, TransformRef, WatchConfig,

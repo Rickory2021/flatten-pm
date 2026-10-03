@@ -40,6 +40,36 @@ pub enum Error {
     /// row (an unknown transform scope).
     #[error(transparent)]
     Database(#[from] crate::db::error::Error),
+
+    /// A recipe name already in use, by a live or a soft-deleted recipe.
+    #[error("recipe name {name} is already taken (soft-deleted recipes keep their names)")]
+    DuplicateName {
+        /// The name.
+        name: String,
+    },
+    /// A recipe name outside `[A-Za-z0-9][A-Za-z0-9_.-]*`.
+    #[error("invalid recipe name {name:?}: expected [A-Za-z0-9][A-Za-z0-9_.-]*")]
+    InvalidName {
+        /// The name as given.
+        name: String,
+    },
+    /// No live recipe has this name.
+    #[error("recipe not found: {0}")]
+    RecipeNotFound(String),
+    /// A rollback target that does not exist or is soft-deleted.
+    #[error("recipe {name} has no version {version}")]
+    VersionNotFound {
+        /// The recipe name.
+        name: String,
+        /// The requested version.
+        version: u32,
+    },
+    /// A builtin recipe cannot be deleted.
+    #[error("recipe {name} is builtin and cannot be deleted")]
+    BuiltinProtected {
+        /// The recipe name.
+        name: String,
+    },
 }
 
 /// Convenience alias for recipe operations.

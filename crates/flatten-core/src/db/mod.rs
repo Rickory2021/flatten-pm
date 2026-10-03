@@ -7,6 +7,20 @@ pub mod writer;
 use error::{Error, Result};
 use rusqlite::{Connection, OpenFlags};
 
+/// Increment the change counter (DA-004 [D10]). Every pointer move calls this
+/// in the same transaction as the move. Errors if the counter row is
+/// missing.
+pub(crate) fn bump_change_counter(conn: &Connection) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE change_counter SET counter = counter + 1 WHERE id = 1",
+        [],
+    )?;
+    if changed == 0 {
+        return Err(Error::RuSQLite(rusqlite::Error::QueryReturnedNoRows));
+    }
+    Ok(())
+}
+
 /// Open a read-only connection to the database.
 /// The writer must have run at least once to create the schema and set WAL mode.
 pub fn open_reader(path: &std::path::Path) -> Result<Connection> {
@@ -61,6 +75,35 @@ mod tests {
         assert!(
             result.is_err(),
             "open_reader should reject non-WAL database"
+        );
+    }
+
+    /// Test 100 (EX-001): bump_change_counter increments by one per call and
+    /// errors when the counter row is missing.
+    #[test]
+    fn bump_change_counter_increments() {
+        let tmp = tempfile::NamedTempFile::new().expect("failed to create temp file");
+        let w = writer::Writer::open(tmp.path()).expect("Writer::open failed");
+        for _ in 0..2 {
+            w.call_write(bump_change_counter)
+                .expect("bump should succeed");
+        }
+        let conn = open_reader(tmp.path()).expect("open_reader failed");
+        let counter: i64 = conn
+            .query_row("SELECT counter FROM change_counter WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .expect("counter row");
+        assert_eq!(counter, 2, "two bumps from a fresh seed");
+
+        w.call_write(|conn| {
+            conn.execute("DELETE FROM change_counter", [])?;
+            Ok(())
+        })
+        .expect("delete the counter row");
+        assert!(
+            w.call_write(bump_change_counter).is_err(),
+            "a missing counter row is an error"
         );
     }
 
